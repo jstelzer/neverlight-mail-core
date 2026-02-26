@@ -4,6 +4,9 @@ version = "0.0.1"
 edition = "2021"
 license = "GPL-3.0-or-later"
 description = "Headless email engine for Nevermail"
+repository = "https://github.com/neverlight/nevermail-core"
+homepage = "https://github.com/neverlight/nevermail-core"
+documentation = "https://docs.rs/nevermail-core"
 
 [dependencies]
 # Mail engine
