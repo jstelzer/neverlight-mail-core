@@ -359,6 +359,14 @@ impl SetupModel {
                     .unwrap_or(MultiAccountFileConfig {
                         accounts: Vec::new(),
                     });
+                if multi
+                    .accounts
+                    .iter()
+                    .any(|a| a.server == fac.server && a.username == fac.username)
+                {
+                    self.error = Some("Account already exists for this server/username".into());
+                    return SetupTransition::Continue;
+                }
                 multi.accounts.push(fac);
                 if let Err(e) = multi.save() {
                     self.error = Some(format!("Failed to save config: {e}"));
@@ -391,15 +399,26 @@ impl SetupModel {
                         accounts: Vec::new(),
                     });
 
-                // Only update password backend if operator entered a new one
+                let existing = match multi.accounts.iter().find(|a| a.id == *account_id) {
+                    Some(a) => a,
+                    None => {
+                        self.error = Some("Account not found in config".into());
+                        return SetupTransition::Continue;
+                    }
+                };
+
+                // If server/username changed, keyring lookup key changes —
+                // require password so we can store it under the new key
+                let creds_changed =
+                    existing.server != server || existing.username != username;
+                if creds_changed && self.password.is_empty() {
+                    self.error =
+                        Some("Password required when changing server or username".into());
+                    return SetupTransition::Continue;
+                }
+
                 let password_backend = if self.password.is_empty() {
-                    // Keep existing backend from config
-                    multi
-                        .accounts
-                        .iter()
-                        .find(|a| a.id == *account_id)
-                        .map(|a| a.password.clone())
-                        .unwrap_or(PasswordBackend::Keyring)
+                    existing.password.clone()
                 } else {
                     store_password(&username, &server, &self.password)
                 };
