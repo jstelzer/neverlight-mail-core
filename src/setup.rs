@@ -135,6 +135,9 @@ pub struct SetupModel {
     pub smtp_username: String,
     pub smtp_password: String,
     pub smtp_starttls: bool,
+    /// When `true`, the SMTP server field auto-syncs from the IMAP server.
+    /// Set to `false` when the user explicitly edits the SMTP server field.
+    pub smtp_server_synced: bool,
     pub active_field: FieldId,
     pub error: Option<String>,
 }
@@ -158,6 +161,7 @@ impl SetupModel {
                 smtp_username: String::new(),
                 smtp_password: String::new(),
                 smtp_starttls: true,
+                smtp_server_synced: true,
                 active_field: FieldId::Server,
                 error: None,
             },
@@ -182,6 +186,7 @@ impl SetupModel {
                 smtp_username: String::new(),
                 smtp_password: String::new(),
                 smtp_starttls: true,
+                smtp_server_synced: true,
                 active_field: FieldId::Password,
                 error: error.clone(),
             },
@@ -206,6 +211,7 @@ impl SetupModel {
             smtp_username: fields.smtp_username,
             smtp_password: String::new(),
             smtp_starttls: fields.smtp_starttls,
+            smtp_server_synced: false,
             active_field: FieldId::Server,
             error: None,
         }
@@ -287,7 +293,10 @@ impl SetupModel {
                         FieldId::Username => self.username = value,
                         FieldId::Password => self.password = value,
                         FieldId::Email => self.email = value,
-                        FieldId::SmtpServer => self.smtp_server = value,
+                        FieldId::SmtpServer => {
+                            self.smtp_server_synced = value.is_empty();
+                            self.smtp_server = value;
+                        }
                         FieldId::SmtpPort => self.smtp_port = value,
                         FieldId::SmtpUsername => self.smtp_username = value,
                         FieldId::SmtpPassword => self.smtp_password = value,
