@@ -138,9 +138,9 @@ impl SmtpConfig {
 
     /// Legacy: build from IMAP config with env var overrides (for env-var accounts).
     pub fn from_imap_config(config: &Config) -> Self {
-        let server = std::env::var("NEVERMAIL_SMTP_SERVER")
+        let server = std::env::var("NEVERLIGHT_MAIL_SMTP_SERVER")
             .unwrap_or_else(|_| config.imap_server.clone());
-        let port = std::env::var("NEVERMAIL_SMTP_PORT")
+        let port = std::env::var("NEVERLIGHT_MAIL_SMTP_PORT")
             .ok()
             .and_then(|p| p.parse().ok())
             .unwrap_or(587);
@@ -245,7 +245,7 @@ pub enum ConfigNeedsInput {
 fn config_dir() -> PathBuf {
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("nevermail")
+        .join("neverlight-mail")
 }
 
 fn config_path() -> PathBuf {
@@ -364,17 +364,17 @@ impl MultiAccountFileConfig {
 impl Config {
     /// Try env vars. Returns None if any required var is missing.
     fn from_env() -> Option<Self> {
-        let imap_server = std::env::var("NEVERMAIL_SERVER").ok()?;
-        let username = std::env::var("NEVERMAIL_USER").ok()?;
-        let password = std::env::var("NEVERMAIL_PASSWORD").ok()?;
-        let imap_port = std::env::var("NEVERMAIL_PORT")
+        let imap_server = std::env::var("NEVERLIGHT_MAIL_SERVER").ok()?;
+        let username = std::env::var("NEVERLIGHT_MAIL_USER").ok()?;
+        let password = std::env::var("NEVERLIGHT_MAIL_PASSWORD").ok()?;
+        let imap_port = std::env::var("NEVERLIGHT_MAIL_PORT")
             .ok()
             .and_then(|p| p.parse().ok())
             .unwrap_or(993);
-        let use_starttls = std::env::var("NEVERMAIL_STARTTLS")
+        let use_starttls = std::env::var("NEVERLIGHT_MAIL_STARTTLS")
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
-        let email_addresses = std::env::var("NEVERMAIL_FROM")
+        let email_addresses = std::env::var("NEVERLIGHT_MAIL_FROM")
             .ok()
             .map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
             .unwrap_or_default();

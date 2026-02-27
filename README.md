@@ -1,6 +1,6 @@
-# nevermail-core
+# neverlight-mail-core
 
-Headless email engine for [Nevermail](https://github.com/neverlight/nevermail). IMAP, SMTP, MIME rendering, credential storage, and a SQLite cache — everything a mail client needs except the UI.
+Headless email engine for [Neverlight Mail](https://github.com/jstelzer/neverlight-mail). IMAP, SMTP, MIME rendering, credential storage, and a SQLite cache — everything a mail client needs except the UI.
 
 Zero GUI dependencies. Built on [melib](https://git.meli-email.org/meli/meli) (from the meli project) for IMAP and MIME, [lettre](https://crates.io/crates/lettre) for SMTP, and [rusqlite](https://crates.io/crates/rusqlite) for local caching.
 
@@ -8,7 +8,7 @@ Zero GUI dependencies. Built on [melib](https://git.meli-email.org/meli/meli) (f
 
 ```toml
 [dependencies]
-nevermail-core = "0.0.2"
+neverlight-mail-core = "0.0.2"
 ```
 
 ## Modules
@@ -28,15 +28,15 @@ nevermail-core = "0.0.2"
 Key melib types are re-exported so consumers don't need a direct melib dependency:
 
 ```rust
-use nevermail_core::{EnvelopeHash, MailboxHash, FlagOp, Flag, BackendEvent, RefreshEventKind};
+use neverlight_mail_core::{EnvelopeHash, MailboxHash, FlagOp, Flag, BackendEvent, RefreshEventKind};
 ```
 
 ## Example
 
 ```rust
-use nevermail_core::config::Config;
-use nevermail_core::imap::ImapSession;
-use nevermail_core::store::CacheHandle;
+use neverlight_mail_core::config::Config;
+use neverlight_mail_core::imap::ImapSession;
+use neverlight_mail_core::store::CacheHandle;
 
 // Resolve accounts from env vars or config file
 let accounts = Config::resolve_all_accounts()?;
@@ -49,8 +49,8 @@ let folders = session.fetch_folders().await?;
 
 ## Consumers
 
-- [nevermail](https://github.com/neverlight/nevermail) — COSMIC desktop email client
-- nevermail-tui (planned) — ratatui terminal client
+- [neverlight-mail](https://github.com/jstelzer/neverlight-mail) — COSMIC desktop email client
+- neverlight-mail-tui (planned) — ratatui terminal client
 
 ## License
 

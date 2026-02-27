@@ -1,17 +1,17 @@
-# Claude Context: nevermail-core
+# Claude Context: neverlight-mail-core
 
 **Last Updated:** 2026-02-26
 
 ## What This Is
 
-Headless email engine library extracted from [Nevermail](../). Zero GUI dependencies. Provides IMAP, SMTP, MIME rendering, credential storage, config resolution, and a SQLite cache — everything a mail client needs except the UI.
+Headless email engine library extracted from [Neverlight Mail](../). Zero GUI dependencies. Provides IMAP, SMTP, MIME rendering, credential storage, config resolution, and a SQLite cache — everything a mail client needs except the UI.
 
-Designed so multiple frontends can share the same engine: the COSMIC GUI (`nevermail`) today, a ratatui TUI (`nevermail-tui`) tomorrow.
+Designed so multiple frontends can share the same engine: the COSMIC GUI (`neverlight-mail`) today, a ratatui TUI (`neverlight-mail-tui`) tomorrow.
 
 ## Crate Structure
 
 ```
-nevermail-core/
+neverlight-mail-core/
 ├── Cargo.toml
 ├── src/
 │   ├── lib.rs          — pub mod declarations + melib re-exports
@@ -58,8 +58,8 @@ If a consumer needs more melib types, add them to the re-export list rather than
 
 ### Config resolution order
 `Config::resolve_all_accounts()`:
-1. Environment variables (`NEVERMAIL_SERVER`, etc.) → single env account
-2. Config file (`~/.config/nevermail/config.json`) → multi-account with keyring
+1. Environment variables (`NEVERLIGHT_MAIL_SERVER`, etc.) → single env account
+2. Config file (`~/.config/neverlight-mail/config.json`) → multi-account with keyring
 3. Returns `Err(ConfigNeedsInput)` if UI input is needed (full setup or password only)
 
 ## Critical: Version Pinning
@@ -76,7 +76,7 @@ cargo update -p imap-codec --precise 2.0.0-alpha.4
 cargo update -p imap-types --precise 2.0.0-alpha.4
 ```
 
-This is an upstream melib bug. Monitor melib releases for a fix. Any consumer with its own lockfile (nevermail, nevermail-tui) must also maintain these pins.
+This is an upstream melib bug. Monitor melib releases for a fix. Any consumer with its own lockfile (neverlight-mail, neverlight-mail-tui) must also maintain these pins.
 
 ## Dependencies
 
@@ -98,7 +98,7 @@ This is an upstream melib bug. Monitor melib releases for a fix. Any consumer wi
 ## Testing
 
 ```bash
-cargo test -p nevermail-core          # core tests only
+cargo test -p neverlight-mail-core          # core tests only
 cargo test --workspace                # everything
 ```
 

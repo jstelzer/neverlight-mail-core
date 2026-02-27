@@ -36,7 +36,7 @@ impl CacheHandle {
         let (tx, rx) = mpsc::unbounded_channel();
 
         std::thread::Builder::new()
-            .name("nevermail-cache".into())
+            .name("neverlight-mail-cache".into())
             .spawn(move || run_loop(conn, rx))
             .map_err(|e| format!("Failed to spawn cache thread: {e}"))?;
 
@@ -45,7 +45,7 @@ impl CacheHandle {
 
     fn resolve_path() -> Result<PathBuf, String> {
         let base = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
-        Ok(base.join("nevermail"))
+        Ok(base.join("neverlight-mail"))
     }
 
     // -- async methods -------------------------------------------------------

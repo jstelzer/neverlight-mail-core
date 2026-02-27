@@ -2,7 +2,7 @@ release: build
     cargo build --release
 
 build:
-    cargo clippy --bin "nevermail" -p nevermail
+    cargo clippy 
     cargo build
     cargo test
 

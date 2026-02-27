@@ -1,12 +1,12 @@
 [package]
-name = "nevermail-core"
+name = "neverlight-mail-core"
 version = "0.0.2"
 edition = "2021"
 license = "GPL-3.0-or-later"
-description = "Headless email engine for Nevermail"
-repository = "https://github.com/neverlight/nevermail-core"
-homepage = "https://github.com/neverlight/nevermail-core"
-documentation = "https://docs.rs/nevermail-core"
+description = "Headless email engine for Neverlight Mail"
+repository = "https://github.com/jstelzer/neverlight-mail-core"
+homepage = "https://github.com/jstelzer/neverlight-mail-core"
+documentation = "https://docs.rs/neverlight-mail-core"
 
 [dependencies]
 # Mail engine

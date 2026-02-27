@@ -1,4 +1,4 @@
-const SERVICE: &str = "nevermail";
+const SERVICE: &str = "neverlight-mail";
 
 fn key_id(username: &str, server: &str) -> String {
     format!("{username}@{server}")
