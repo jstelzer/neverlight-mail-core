@@ -230,6 +230,7 @@ pub enum ConfigNeedsInput {
     FullSetup,
     /// Config exists but password is missing from keyring.
     PasswordOnly {
+        account_id: AccountId,
         server: String,
         port: u16,
         username: String,
@@ -433,6 +434,7 @@ impl Config {
                     // All accounts failed password resolution — show password dialog
                     let fac = &multi.accounts[0];
                     return Err(ConfigNeedsInput::PasswordOnly {
+                        account_id: fac.id.clone(),
                         server: fac.server.clone(),
                         port: fac.port,
                         username: fac.username.clone(),
