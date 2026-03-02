@@ -19,13 +19,15 @@ pub struct CacheHandle {
 
 impl CacheHandle {
     /// Open (or create) the cache database and spawn the background thread.
-    pub fn open() -> Result<Self, String> {
+    /// Each app should pass a unique `app_id` (e.g. "tui", "cosmic") so that
+    /// concurrent apps get separate DB files (`cache-tui.db`, `cache-cosmic.db`).
+    pub fn open(app_id: &str) -> Result<Self, String> {
         let db_path = Self::resolve_path()?;
 
         std::fs::create_dir_all(&db_path)
             .map_err(|e| format!("Failed to create cache dir: {e}"))?;
 
-        let db_file = db_path.join("cache.db");
+        let db_file = db_path.join(format!("cache-{app_id}.db"));
         let conn =
             Connection::open(&db_file).map_err(|e| format!("Failed to open cache db: {e}"))?;
 
