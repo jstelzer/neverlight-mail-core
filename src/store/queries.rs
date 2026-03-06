@@ -10,7 +10,7 @@ use crate::models::{AttachmentData, Folder, MessageSummary};
 ///   5: is_read, 6: is_starred, 7: has_attachments, 8: thread_id,
 ///   9: flags_server, 10: flags_local, 11: pending_op, 12: mailbox_hash,
 ///   13: message_id, 14: in_reply_to, 15: thread_depth, 16: reply_to,
-///   17: recipient
+///   17: recipient, 18: account_id
 fn row_to_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<MessageSummary> {
     let envelope_hash: i64 = row.get(0)?;
     let thread_id: Option<i64> = row.get(8)?;
@@ -28,6 +28,7 @@ fn row_to_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<MessageSummary> {
     let (is_read, is_starred) = flags_from_u8(effective_flags);
 
     Ok(MessageSummary {
+        account_id: row.get(18)?,
         uid: envelope_hash as u64,
         subject: row.get(1)?,
         from: row.get(2)?,
@@ -313,7 +314,8 @@ pub(super) fn do_load_messages(
             "SELECT envelope_hash, subject, sender, date, timestamp,
                     is_read, is_starred, has_attachments, thread_id,
                     flags_server, flags_local, pending_op, mailbox_hash,
-                    message_id, in_reply_to, thread_depth, reply_to, recipient
+                    message_id, in_reply_to, thread_depth, reply_to, recipient,
+                    account_id
              FROM messages
              WHERE mailbox_hash = ?1 AND account_id = ?4
              ORDER BY
@@ -579,7 +581,8 @@ pub(super) fn do_search(conn: &Connection, query: &str) -> Result<Vec<MessageSum
             "SELECT m.envelope_hash, m.subject, m.sender, m.date, m.timestamp,
                     m.is_read, m.is_starred, m.has_attachments, m.thread_id,
                     m.flags_server, m.flags_local, m.pending_op, m.mailbox_hash,
-                    m.message_id, m.in_reply_to, m.thread_depth, m.reply_to, m.recipient
+                    m.message_id, m.in_reply_to, m.thread_depth, m.reply_to, m.recipient,
+                    m.account_id
              FROM messages m
              WHERE m.rowid IN (SELECT rowid FROM message_fts WHERE message_fts MATCH ?1)
              ORDER BY m.timestamp DESC
@@ -619,6 +622,7 @@ mod tests {
 
     fn sample_message(envelope_hash: u64, mailbox_hash: u64, subject: &str) -> MessageSummary {
         MessageSummary {
+            account_id: String::new(),
             uid: envelope_hash,
             subject: subject.to_string(),
             from: "from@example.com".to_string(),

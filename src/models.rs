@@ -13,6 +13,8 @@ pub struct Folder {
 /// Summary of a message for the list view (no body).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessageSummary {
+    #[serde(default)]
+    pub account_id: String,
     pub uid: u64,
     pub subject: String,
     pub from: String,

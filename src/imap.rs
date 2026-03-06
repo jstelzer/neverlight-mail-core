@@ -186,6 +186,7 @@ impl ImapSession {
                     .map(|s| s.to_string());
 
                 messages.push(MessageSummary {
+                    account_id: String::new(),
                     uid: envelope.hash().0,
                     subject: envelope.subject().to_string(),
                     from: from_str,
