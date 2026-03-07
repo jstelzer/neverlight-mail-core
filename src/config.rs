@@ -5,6 +5,39 @@ use std::path::PathBuf;
 use crate::keyring;
 
 // ---------------------------------------------------------------------------
+// Protocol — IMAP or JMAP backend selection
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Protocol {
+    Imap,
+    Jmap,
+}
+
+impl Default for Protocol {
+    fn default() -> Self {
+        Protocol::Imap
+    }
+}
+
+/// Capabilities discovered during account setup.
+/// Stored alongside the account so we don't need to re-probe on every launch.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AccountCapabilities {
+    pub protocol: Protocol,
+    /// Cached JMAP session resource URL (from `.well-known/jmap` discovery).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jmap_session_url: Option<String>,
+    /// Whether the server advertises JMAP push (EventSource).
+    #[serde(default)]
+    pub supports_push: bool,
+    /// Whether the server advertises JMAP EmailSubmission.
+    #[serde(default)]
+    pub supports_submission: bool,
+}
+
+// ---------------------------------------------------------------------------
 // AccountId — stable UUIDv4 per account
 // ---------------------------------------------------------------------------
 
@@ -52,6 +85,8 @@ pub struct FileAccountConfig {
     pub email_addresses: Vec<String>,
     #[serde(default)]
     pub smtp: SmtpOverrides,
+    #[serde(default)]
+    pub capabilities: AccountCapabilities,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -180,6 +215,7 @@ pub struct AccountConfig {
     pub email_addresses: Vec<String>,
     pub smtp: SmtpConfig,
     pub smtp_overrides: SmtpOverrides,
+    pub capabilities: AccountCapabilities,
 }
 
 impl AccountConfig {
@@ -197,7 +233,13 @@ impl AccountConfig {
             email_addresses: fac.email_addresses.clone(),
             smtp,
             smtp_overrides: fac.smtp.clone(),
+            capabilities: fac.capabilities.clone(),
         }
+    }
+
+    /// Convenience: which protocol this account uses.
+    pub fn protocol(&self) -> Protocol {
+        self.capabilities.protocol
     }
 
     /// Convert to a legacy Config for ImapSession::connect (temporary bridge).
@@ -329,6 +371,7 @@ impl MultiAccountFileConfig {
                     password: legacy.password,
                     email_addresses: legacy.email_addresses,
                     smtp: SmtpOverrides::default(),
+                    capabilities: AccountCapabilities::default(),
                 }],
             };
             // Write back migrated format
@@ -406,6 +449,7 @@ impl Config {
                 email_addresses: config.email_addresses.clone(),
                 smtp,
                 smtp_overrides: SmtpOverrides::default(),
+                capabilities: AccountCapabilities::default(),
             }]);
         }
 

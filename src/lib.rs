@@ -1,5 +1,8 @@
 pub mod config;
+pub mod discovery;
+pub mod envelope;
 pub mod imap;
+pub mod jmap;
 pub mod keyring;
 pub mod mime;
 pub mod models;

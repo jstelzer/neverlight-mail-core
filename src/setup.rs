@@ -5,8 +5,8 @@
 //! live here so bugs are fixed once.
 
 use crate::config::{
-    new_account_id, AccountId, ConfigNeedsInput, FileAccountConfig, MultiAccountFileConfig,
-    PasswordBackend, SmtpOverrides,
+    new_account_id, AccountCapabilities, AccountId, ConfigNeedsInput, FileAccountConfig,
+    MultiAccountFileConfig, PasswordBackend, Protocol, SmtpOverrides,
 };
 use crate::keyring;
 
@@ -123,6 +123,7 @@ impl SetupRequest {
 /// [`update()`] with mapped input events.
 pub struct SetupModel {
     pub request: SetupRequest,
+    pub protocol: Protocol,
     pub label: String,
     pub server: String,
     pub port: String,
@@ -149,6 +150,7 @@ impl SetupModel {
         match needs {
             ConfigNeedsInput::FullSetup => Self {
                 request,
+                protocol: Protocol::Imap,
                 label: String::new(),
                 server: String::new(),
                 port: "993".into(),
@@ -174,6 +176,7 @@ impl SetupModel {
                 ..
             } => Self {
                 request,
+                protocol: Protocol::Imap,
                 label: String::new(),
                 server: server.clone(),
                 port: port.to_string(),
@@ -199,6 +202,7 @@ impl SetupModel {
     pub fn for_edit(account_id: AccountId, fields: SetupFields) -> Self {
         Self {
             request: SetupRequest::Edit { account_id },
+            protocol: fields.protocol,
             label: fields.label,
             server: fields.server,
             port: fields.port,
@@ -404,6 +408,7 @@ impl SetupModel {
                 let smtp_pw = store_smtp_password(&account_id, &self.smtp_password);
                 let smtp = self.build_smtp_overrides(smtp_pw);
 
+                let capabilities = self.build_capabilities(&server);
                 let fac = FileAccountConfig {
                     id: account_id,
                     label,
@@ -414,6 +419,7 @@ impl SetupModel {
                     password: password_backend,
                     email_addresses,
                     smtp,
+                    capabilities,
                 };
 
                 let mut multi = MultiAccountFileConfig::load().ok().flatten().unwrap_or(
@@ -490,6 +496,11 @@ impl SetupModel {
                 };
                 let smtp = self.build_smtp_overrides(smtp_pw);
 
+                let capabilities = if self.protocol == existing.capabilities.protocol {
+                    existing.capabilities.clone()
+                } else {
+                    self.build_capabilities(&server)
+                };
                 let fac = FileAccountConfig {
                     id: account_id.clone(),
                     label,
@@ -500,6 +511,7 @@ impl SetupModel {
                     password: password_backend,
                     email_addresses,
                     smtp,
+                    capabilities,
                 };
 
                 if let Some(pos) = multi.accounts.iter().position(|a| a.id == *account_id) {
@@ -574,6 +586,19 @@ impl SetupModel {
         None
     }
 
+    /// Build capabilities from the declared protocol.
+    fn build_capabilities(&self, server: &str) -> AccountCapabilities {
+        match self.protocol {
+            Protocol::Imap => AccountCapabilities::default(),
+            Protocol::Jmap => AccountCapabilities {
+                protocol: Protocol::Jmap,
+                jmap_session_url: Some(format!("https://{}/.well-known/jmap", server)),
+                supports_push: false,
+                supports_submission: false,
+            },
+        }
+    }
+
     /// Build SMTP overrides from the model's SMTP fields.
     pub fn build_smtp_overrides(&self, password: Option<PasswordBackend>) -> SmtpOverrides {
         SmtpOverrides {
@@ -633,6 +658,7 @@ pub enum SetupOutcome {
 
 /// Pre-filled field values for the Edit flow.
 pub struct SetupFields {
+    pub protocol: Protocol,
     pub label: String,
     pub server: String,
     pub port: String,

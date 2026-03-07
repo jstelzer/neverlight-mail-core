@@ -17,6 +17,9 @@ neverlight-mail-core/
 │   ├── lib.rs          — pub mod declarations + melib re-exports
 │   ├── config.rs       — Config resolution (env → file+keyring → error enum)
 │   ├── imap.rs         — ImapSession: connect, fetch, flags, move, watch
+│   ├── jmap.rs         — JmapSession: JMAP backend (mirrors ImapSession API)
+│   ├── discovery.rs    — JMAP autodiscovery (RFC 8620 §2.2, probes .well-known/jmap)
+│   ├── envelope.rs     — Shared envelope/body extraction (used by both backends)
 │   ├── smtp.rs         — SMTP send via lettre (OutgoingEmail struct)
 │   ├── mime.rs         — render_body, render_body_markdown, open_link
 │   ├── keyring.rs      — OS keyring credential backend (get/set/delete)

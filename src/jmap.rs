@@ -9,17 +9,19 @@ use melib::backends::{
     BackendEventConsumer, EnvelopeHashBatch, FlagOp, IsSubscribedFn, MailBackend,
 };
 use melib::conf::AccountSettings;
-use melib::imap::ImapType;
+use melib::jmap::JmapType;
 use melib::{AccountHash, EnvelopeHash, Mail, MailboxHash};
 
-use crate::config::Config;
+use crate::config::AccountConfig;
 use crate::envelope::{envelope_to_summary, extract_body};
 use crate::models::{AttachmentData, Folder, MessageSummary};
 
-/// A live IMAP session backed by melib.
-pub struct ImapSession {
-    backend: Arc<Mutex<Box<ImapType>>>,
-    /// Map from mailbox hash to folder path (for lookups).
+/// A live JMAP session backed by melib.
+///
+/// Mirrors `ImapSession` in structure: wraps melib's backend behind
+/// `Arc<Mutex<...>>` and exposes the same set of async operations.
+pub struct JmapSession {
+    backend: Arc<Mutex<Box<JmapType>>>,
     mailbox_paths: Mutex<HashMap<MailboxHash, String>>,
 }
 
@@ -28,35 +30,37 @@ fn map_mailbox_counts(counts: (usize, usize)) -> (u32, u32) {
     (unseen as u32, total as u32)
 }
 
-impl std::fmt::Debug for ImapSession {
+impl std::fmt::Debug for JmapSession {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ImapSession").finish_non_exhaustive()
+        f.debug_struct("JmapSession").finish_non_exhaustive()
     }
 }
 
-impl ImapSession {
-    /// Connect to the IMAP server using the given config.
-    pub async fn connect(config: Config) -> Result<Arc<Self>, String> {
+impl JmapSession {
+    /// Connect to a JMAP server using the given account config.
+    ///
+    /// The `session_url` is the JMAP session resource URL, typically
+    /// discovered via `https://{domain}/.well-known/jmap`.
+    pub async fn connect(
+        config: &AccountConfig,
+        session_url: &str,
+    ) -> Result<Arc<Self>, String> {
         let mut extra = IndexMap::new();
-        extra.insert("server_hostname".into(), config.imap_server.clone());
+        extra.insert("server_url".into(), session_url.to_string());
         extra.insert("server_username".into(), config.username.clone());
         extra.insert("server_password".into(), config.password.clone());
-        extra.insert("server_port".into(), config.imap_port.to_string());
-        extra.insert("use_tls".into(), "true".into());
-        // Prefer conservative server behavior over throughput:
-        // keep a single command connection to avoid provider connection limits.
-        extra.insert("use_connection_pool".into(), "false".into());
-        extra.insert(
-            "use_starttls".into(),
-            if config.use_starttls { "true" } else { "false" }.into(),
-        );
+        extra.insert("use_token".into(), "true".into());
         extra.insert("danger_accept_invalid_certs".into(), "false".into());
 
         let account_settings = AccountSettings {
             name: config.username.clone(),
             root_mailbox: "INBOX".into(),
-            format: "imap".into(),
-            identity: config.username.clone(),
+            format: "jmap".into(),
+            identity: config
+                .email_addresses
+                .first()
+                .cloned()
+                .unwrap_or_else(|| config.username.clone()),
             extra,
             ..Default::default()
         };
@@ -66,29 +70,30 @@ impl ImapSession {
 
         let event_consumer = BackendEventConsumer::new(Arc::new(
             |_account_hash: AccountHash, event: melib::backends::BackendEvent| {
-                log::debug!("IMAP backend event: {:?}", event);
+                log::debug!("JMAP backend event: {:?}", event);
             },
         ));
 
-        let backend = ImapType::new(&account_settings, is_subscribed, event_consumer)
-            .map_err(|e| format!("Failed to create IMAP backend: {}", e))?;
+        let backend = JmapType::new(&account_settings, is_subscribed, event_consumer)
+            .map_err(|e| format!("Failed to create JMAP backend: {}", e))?;
 
-        let session = ImapSession {
+        let session = JmapSession {
             backend: Arc::new(Mutex::new(backend)),
             mailbox_paths: Mutex::new(HashMap::new()),
         };
 
-        // Verify we can connect
+        // Verify connectivity (fetches JMAP session object)
         {
             let backend = session.backend.lock().await;
             let online_future = backend
                 .is_online()
-                .map_err(|e| format!("IMAP is_online failed: {}", e))?;
+                .map_err(|e| format!("JMAP is_online failed: {}", e))?;
             online_future
                 .await
-                .map_err(|e| format!("IMAP connection failed: {}", e))?;
+                .map_err(|e| format!("JMAP connection failed: {}", e))?;
         }
 
+        log::info!("JMAP session established for {}", config.username);
         Ok(Arc::new(session))
     }
 
@@ -138,6 +143,7 @@ impl ImapSession {
 
         *self.mailbox_paths.lock().await = path_map;
 
+        log::info!("JMAP: fetched {} mailboxes", folders.len());
         Ok(folders)
     }
 
@@ -188,6 +194,11 @@ impl ImapSession {
     }
 
     /// Move a message from one mailbox to another.
+    ///
+    /// JMAP note: this uses `Email/set` to patch `mailboxIds`, which is the
+    /// correct way to move messages over JMAP. The `Flag::TRASHED` -> `$junk`
+    /// mapping in melib is wrong for trash operations, so callers must always
+    /// use this method (not flag-based trash) for JMAP accounts.
     pub async fn move_messages(
         self: &Arc<Self>,
         envelope_hash: EnvelopeHash,
@@ -209,6 +220,28 @@ impl ImapSession {
         future
             .await
             .map_err(|e| format!("Failed to move message: {}", e))?;
+        Ok(())
+    }
+
+    /// Permanently delete a message.
+    ///
+    /// For JMAP, this is `Email/set { destroy: [...] }`. Use `move_messages`
+    /// to move to Trash instead; reserve this for "empty trash" operations.
+    pub async fn delete_messages(
+        self: &Arc<Self>,
+        envelope_hash: EnvelopeHash,
+        mailbox_hash: MailboxHash,
+    ) -> Result<(), String> {
+        let future = {
+            let mut backend = self.backend.lock().await;
+            backend
+                .delete_messages(EnvelopeHashBatch::from(envelope_hash), mailbox_hash)
+                .map_err(|e| format!("Failed to request delete: {}", e))?
+        };
+
+        future
+            .await
+            .map_err(|e| format!("Failed to delete message: {}", e))?;
         Ok(())
     }
 
@@ -241,7 +274,7 @@ impl ImapSession {
         Ok((markdown_rendered, plain_rendered, attachments))
     }
 
-    /// Start watching for backend events (IMAP IDLE or poll fallback).
+    /// Start watching for changes (JMAP poll loop — 60s intervals).
     /// Returns a `'static` stream — safe to hold after releasing the lock.
     pub async fn watch(
         self: &Arc<Self>,
@@ -255,18 +288,7 @@ impl ImapSession {
                 .watch()
                 .map_err(|e| format!("Failed to start watch: {}", e))?
         };
+        log::info!("JMAP watch stream started (60s poll interval)");
         Ok(stream)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::map_mailbox_counts;
-
-    #[test]
-    fn mailbox_count_tuple_maps_to_unread_then_total() {
-        let (unread, total) = map_mailbox_counts((3, 10));
-        assert_eq!(unread, 3);
-        assert_eq!(total, 10);
     }
 }
