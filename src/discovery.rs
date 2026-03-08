@@ -1,8 +1,7 @@
 //! JMAP autodiscovery via RFC 8620 §2.2.
 //!
 //! Probes `https://{domain}/.well-known/jmap` with basic auth to determine
-//! whether a mail server supports JMAP. Used during account setup to
-//! auto-select the best protocol.
+//! whether a mail server supports JMAP.
 
 use crate::config::{AccountCapabilities, Protocol};
 
@@ -11,9 +10,6 @@ use crate::config::{AccountCapabilities, Protocol};
 /// Tries `GET https://{domain}/.well-known/jmap` with basic auth.
 /// Returns `AccountCapabilities` with protocol set to `Jmap` if the server
 /// responds with a valid JMAP session object, otherwise `Imap`.
-///
-/// The `domain` should be the mail server hostname (e.g. "fastmail.com",
-/// "mail.runbox.com"). The function extracts the base domain and probes it.
 pub async fn probe_capabilities(
     domain: &str,
     username: &str,
@@ -31,8 +27,8 @@ pub async fn probe_capabilities(
             caps
         }
         Err(e) => {
-            log::info!("JMAP discovery failed for {}, falling back to IMAP: {}", domain, e);
-            AccountCapabilities::default() // Protocol::Imap
+            log::info!("JMAP discovery failed for {}: {}", domain, e);
+            AccountCapabilities::default()
         }
     }
 }
@@ -42,23 +38,20 @@ async fn try_jmap_discovery(
     username: &str,
     password: &str,
 ) -> Result<AccountCapabilities, String> {
-    use isahc::prelude::*;
-    use isahc::auth::{Authentication, Credentials};
-
     let url = format!("https://{}/.well-known/jmap", domain);
 
-    let client = isahc::HttpClient::builder()
-        .authentication(Authentication::basic())
-        .credentials(Credentials::new(username, password))
-        .redirect_policy(isahc::config::RedirectPolicy::Limit(3))
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::limited(3))
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|e| format!("HTTP client error: {}", e))?;
 
-    let mut response = tokio::task::spawn_blocking(move || client.get(&url))
+    let response = client
+        .get(&url)
+        .basic_auth(username, Some(password))
+        .send()
         .await
-        .map_err(|e| format!("task join error: {}", e))?
-        .map_err(|e| format!("GET {}: {}", format!("https://{}/.well-known/jmap", domain), e))?;
+        .map_err(|e| format!("GET {}: {}", url, e))?;
 
     if !response.status().is_success() {
         return Err(format!(
@@ -69,6 +62,7 @@ async fn try_jmap_discovery(
 
     let body = response
         .text()
+        .await
         .map_err(|e| format!("reading response body: {}", e))?;
 
     parse_session_object(&body, domain)
@@ -79,13 +73,11 @@ fn parse_session_object(json: &str, domain: &str) -> Result<AccountCapabilities,
     let session: serde_json::Value =
         serde_json::from_str(json).map_err(|e| format!("invalid JSON: {}", e))?;
 
-    // Must have capabilities object
     let capabilities = session
         .get("capabilities")
         .and_then(|v| v.as_object())
         .ok_or("missing or invalid 'capabilities' in session object")?;
 
-    // Must support core JMAP mail
     if !capabilities.contains_key("urn:ietf:params:jmap:mail") {
         return Err("server does not advertise urn:ietf:params:jmap:mail".into());
     }
@@ -96,12 +88,10 @@ fn parse_session_object(json: &str, domain: &str) -> Result<AccountCapabilities,
     let supports_submission =
         capabilities.contains_key("urn:ietf:params:jmap:submission");
 
-    // The apiUrl is the actual endpoint for JMAP method calls
     let session_url = session
         .get("apiUrl")
         .and_then(|v| v.as_str())
         .map(|api_url| {
-            // apiUrl may be relative — resolve against the discovery domain
             if api_url.starts_with("http://") || api_url.starts_with("https://") {
                 api_url.to_string()
             } else {

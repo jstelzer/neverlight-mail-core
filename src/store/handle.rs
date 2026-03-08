@@ -19,8 +19,6 @@ pub struct CacheHandle {
 
 impl CacheHandle {
     /// Open (or create) the cache database and spawn the background thread.
-    /// Each app should pass a unique `app_id` (e.g. "tui", "cosmic") so that
-    /// concurrent apps get separate DB files (`cache-tui.db`, `cache-cosmic.db`).
     pub fn open(app_id: &str) -> Result<Self, String> {
         let db_path = Self::resolve_path()?;
 
@@ -80,14 +78,14 @@ impl CacheHandle {
     pub async fn save_messages(
         &self,
         account_id: String,
-        mailbox_hash: u64,
+        mailbox_id: String,
         messages: Vec<MessageSummary>,
     ) -> Result<(), String> {
         let (reply, rx) = oneshot::channel();
         self.tx
             .send(CacheCmd::SaveMessages {
                 account_id,
-                mailbox_hash,
+                mailbox_id,
                 messages,
                 reply,
             })
@@ -98,7 +96,7 @@ impl CacheHandle {
     pub async fn load_messages(
         &self,
         account_id: String,
-        mailbox_hash: u64,
+        mailbox_id: String,
         limit: u32,
         offset: u32,
     ) -> Result<Vec<MessageSummary>, String> {
@@ -106,7 +104,7 @@ impl CacheHandle {
         self.tx
             .send(CacheCmd::LoadMessages {
                 account_id,
-                mailbox_hash,
+                mailbox_id,
                 limit,
                 offset,
                 reply,
@@ -118,13 +116,13 @@ impl CacheHandle {
     pub async fn load_body(
         &self,
         account_id: String,
-        envelope_hash: u64,
+        email_id: String,
     ) -> Result<Option<(String, String, Vec<AttachmentData>)>, String> {
         let (reply, rx) = oneshot::channel();
         self.tx
             .send(CacheCmd::LoadBody {
                 account_id,
-                envelope_hash,
+                email_id,
                 reply,
             })
             .map_err(|_| "Cache unavailable".to_string())?;
@@ -134,7 +132,7 @@ impl CacheHandle {
     pub async fn save_body(
         &self,
         account_id: String,
-        envelope_hash: u64,
+        email_id: String,
         body_markdown: String,
         body_plain: String,
         attachments: Vec<AttachmentData>,
@@ -143,7 +141,7 @@ impl CacheHandle {
         self.tx
             .send(CacheCmd::SaveBody {
                 account_id,
-                envelope_hash,
+                email_id,
                 body_markdown,
                 body_plain,
                 attachments,
@@ -153,11 +151,10 @@ impl CacheHandle {
         rx.await.map_err(|_| "Cache unavailable".to_string())?
     }
 
-    /// Set local flags and mark a pending operation.
     pub async fn update_flags(
         &self,
         account_id: String,
-        envelope_hash: u64,
+        email_id: String,
         flags_local: u8,
         pending_op: String,
     ) -> Result<(), String> {
@@ -165,7 +162,7 @@ impl CacheHandle {
         self.tx
             .send(CacheCmd::UpdateFlags {
                 account_id,
-                envelope_hash,
+                email_id,
                 flags_local,
                 pending_op,
                 reply,
@@ -174,18 +171,17 @@ impl CacheHandle {
         rx.await.map_err(|_| "Cache unavailable".to_string())?
     }
 
-    /// IMAP op succeeded — update server flags and clear pending.
     pub async fn clear_pending_op(
         &self,
         account_id: String,
-        envelope_hash: u64,
+        email_id: String,
         flags_server: u8,
     ) -> Result<(), String> {
         let (reply, rx) = oneshot::channel();
         self.tx
             .send(CacheCmd::ClearPendingOp {
                 account_id,
-                envelope_hash,
+                email_id,
                 flags_server,
                 reply,
             })
@@ -193,41 +189,38 @@ impl CacheHandle {
         rx.await.map_err(|_| "Cache unavailable".to_string())?
     }
 
-    /// IMAP op failed — revert local flags to server flags, clear pending.
     pub async fn revert_pending_op(
         &self,
         account_id: String,
-        envelope_hash: u64,
+        email_id: String,
     ) -> Result<(), String> {
         let (reply, rx) = oneshot::channel();
         self.tx
             .send(CacheCmd::RevertPendingOp {
                 account_id,
-                envelope_hash,
+                email_id,
                 reply,
             })
             .map_err(|_| "Cache unavailable".to_string())?;
         rx.await.map_err(|_| "Cache unavailable".to_string())?
     }
 
-    /// Remove a message from the cache (after successful move).
     pub async fn remove_message(
         &self,
         account_id: String,
-        envelope_hash: u64,
+        email_id: String,
     ) -> Result<(), String> {
         let (reply, rx) = oneshot::channel();
         self.tx
             .send(CacheCmd::RemoveMessage {
                 account_id,
-                envelope_hash,
+                email_id,
                 reply,
             })
             .map_err(|_| "Cache unavailable".to_string())?;
         rx.await.map_err(|_| "Cache unavailable".to_string())?
     }
 
-    /// Remove all cached data for an account (folders, messages, attachments).
     pub async fn remove_account(&self, account_id: String) -> Result<(), String> {
         let (reply, rx) = oneshot::channel();
         self.tx
@@ -236,7 +229,6 @@ impl CacheHandle {
         rx.await.map_err(|_| "Cache unavailable".to_string())?
     }
 
-    /// Full-text search across all folders.
     pub async fn search(&self, query: String) -> Result<Vec<MessageSummary>, String> {
         let (reply, rx) = oneshot::channel();
         self.tx
@@ -263,20 +255,20 @@ fn run_loop(conn: Connection, mut rx: mpsc::UnboundedReceiver<CacheCmd>) {
             }
             CacheCmd::SaveMessages {
                 account_id,
-                mailbox_hash,
+                mailbox_id,
                 messages,
                 reply,
             } => {
                 let _ = reply.send(queries::do_save_messages(
                     &conn,
                     &account_id,
-                    mailbox_hash,
+                    &mailbox_id,
                     &messages,
                 ));
             }
             CacheCmd::LoadMessages {
                 account_id,
-                mailbox_hash,
+                mailbox_id,
                 limit,
                 offset,
                 reply,
@@ -284,21 +276,21 @@ fn run_loop(conn: Connection, mut rx: mpsc::UnboundedReceiver<CacheCmd>) {
                 let _ = reply.send(queries::do_load_messages(
                     &conn,
                     &account_id,
-                    mailbox_hash,
+                    &mailbox_id,
                     limit,
                     offset,
                 ));
             }
             CacheCmd::LoadBody {
                 account_id,
-                envelope_hash,
+                email_id,
                 reply,
             } => {
-                let _ = reply.send(queries::do_load_body(&conn, &account_id, envelope_hash));
+                let _ = reply.send(queries::do_load_body(&conn, &account_id, &email_id));
             }
             CacheCmd::SaveBody {
                 account_id,
-                envelope_hash,
+                email_id,
                 body_markdown,
                 body_plain,
                 attachments,
@@ -307,7 +299,7 @@ fn run_loop(conn: Connection, mut rx: mpsc::UnboundedReceiver<CacheCmd>) {
                 let _ = reply.send(queries::do_save_body(
                     &conn,
                     &account_id,
-                    envelope_hash,
+                    &email_id,
                     &body_markdown,
                     &body_plain,
                     &attachments,
@@ -315,7 +307,7 @@ fn run_loop(conn: Connection, mut rx: mpsc::UnboundedReceiver<CacheCmd>) {
             }
             CacheCmd::UpdateFlags {
                 account_id,
-                envelope_hash,
+                email_id,
                 flags_local,
                 pending_op,
                 reply,
@@ -323,45 +315,41 @@ fn run_loop(conn: Connection, mut rx: mpsc::UnboundedReceiver<CacheCmd>) {
                 let _ = reply.send(queries::do_update_flags(
                     &conn,
                     &account_id,
-                    envelope_hash,
+                    &email_id,
                     flags_local,
                     &pending_op,
                 ));
             }
             CacheCmd::ClearPendingOp {
                 account_id,
-                envelope_hash,
+                email_id,
                 flags_server,
                 reply,
             } => {
                 let _ = reply.send(queries::do_clear_pending_op(
                     &conn,
                     &account_id,
-                    envelope_hash,
+                    &email_id,
                     flags_server,
                 ));
             }
             CacheCmd::RevertPendingOp {
                 account_id,
-                envelope_hash,
+                email_id,
                 reply,
             } => {
                 let _ = reply.send(queries::do_revert_pending_op(
                     &conn,
                     &account_id,
-                    envelope_hash,
+                    &email_id,
                 ));
             }
             CacheCmd::RemoveMessage {
                 account_id,
-                envelope_hash,
+                email_id,
                 reply,
             } => {
-                let _ = reply.send(queries::do_remove_message(
-                    &conn,
-                    &account_id,
-                    envelope_hash,
-                ));
+                let _ = reply.send(queries::do_remove_message(&conn, &account_id, &email_id));
             }
             CacheCmd::Search { query, reply } => {
                 let _ = reply.send(queries::do_search(&conn, &query));

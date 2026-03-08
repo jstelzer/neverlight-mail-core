@@ -8,17 +8,12 @@ use crate::keyring;
 // Protocol — IMAP or JMAP backend selection
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Protocol {
     Imap,
+    #[default]
     Jmap,
-}
-
-impl Default for Protocol {
-    fn default() -> Self {
-        Protocol::Imap
-    }
 }
 
 /// Capabilities discovered during account setup.

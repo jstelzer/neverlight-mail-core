@@ -1,24 +1,19 @@
 [package]
 name = "neverlight-mail-core"
-version = "0.0.6"
+version = "0.1.0"
 edition = "2021"
-license = "GPL-3.0-or-later"
-description = "Headless email engine for Neverlight Mail"
+license = "MIT OR Apache-2.0"
+description = "JMAP-native headless email engine"
 repository = "https://github.com/jstelzer/neverlight-mail-core"
 homepage = "https://github.com/jstelzer/neverlight-mail-core"
 documentation = "https://docs.rs/neverlight-mail-core"
 
 [dependencies]
-# Mail engine
-melib = { version = "0.8", default-features = false, features = ["sqlite3", "imap", "jmap"] }
-indexmap = { version = "2", features = ["serde"] }
-futures = "0.3"
+# JMAP HTTP transport
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 
-# SMTP sending
-lettre = { version = "0.11", features = ["tokio1-native-tls"] }
-
-# HTTP client (for JMAP discovery probe; already in dep tree via melib)
-isahc = "1.7"
+# RFC 5322 message parsing (body extraction, MIME tree walking)
+mail-parser = "0.9"
 
 # HTML rendering (privacy-safe sanitization)
 html-safe-md = { version = "0.0.1" }
@@ -29,7 +24,7 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 
-# Serialization
+# Serialization (JMAP is JSON)
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
@@ -47,3 +42,4 @@ uuid = { version = "1", features = ["v4"] }
 
 # Logging
 log = "0.4"
+thiserror = "2.0.18"
