@@ -51,6 +51,15 @@ pub async fn get_identities(client: &JmapClient) -> Result<Vec<Identity>, JmapEr
     Ok(parse_identities(list))
 }
 
+/// Pre-uploaded attachment blob reference for Email/set.
+#[derive(Debug, Clone)]
+pub struct AttachmentBlob {
+    pub blob_id: String,
+    pub type_: String,
+    pub name: String,
+    pub size: u64,
+}
+
 /// Parameters for sending an email.
 pub struct SendRequest<'a> {
     pub identity_id: &'a str,
@@ -62,6 +71,9 @@ pub struct SendRequest<'a> {
     pub html_body: Option<&'a str>,
     pub drafts_mailbox_id: &'a str,
     pub sent_mailbox_id: &'a str,
+    pub in_reply_to: Option<&'a str>,
+    pub references: Option<&'a str>,
+    pub attachments: &'a [AttachmentBlob],
 }
 
 /// Build the Email/set create object for a draft.
@@ -96,6 +108,34 @@ fn build_draft_create(req: &SendRequest<'_>) -> Value {
     if let Some(html) = req.html_body {
         email_create["bodyValues"]["html"] = serde_json::json!({ "value": html });
         email_create["htmlBody"] = serde_json::json!([{ "partId": "html", "type": "text/html" }]);
+    }
+
+    if let Some(in_reply_to) = req.in_reply_to {
+        email_create["inReplyTo"] = serde_json::json!([{ "email": in_reply_to }]);
+    }
+    if let Some(references) = req.references {
+        let refs: Vec<Value> = references
+            .split_whitespace()
+            .map(|r| serde_json::json!({ "email": r }))
+            .collect();
+        email_create["references"] = Value::Array(refs);
+    }
+
+    if !req.attachments.is_empty() {
+        let atts: Vec<Value> = req
+            .attachments
+            .iter()
+            .map(|a| {
+                serde_json::json!({
+                    "blobId": a.blob_id,
+                    "type": a.type_,
+                    "name": a.name,
+                    "size": a.size,
+                    "disposition": "attachment",
+                })
+            })
+            .collect();
+        email_create["attachments"] = Value::Array(atts);
     }
 
     email_create
@@ -243,6 +283,9 @@ mod tests {
             html_body: None,
             drafts_mailbox_id: "mb-drafts",
             sent_mailbox_id: "mb-sent",
+            in_reply_to: None,
+            references: None,
+            attachments: &[],
         }
     }
 
