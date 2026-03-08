@@ -8,7 +8,7 @@ use crate::client::{JmapClient, JmapError};
 use crate::mime;
 use crate::models::{AttachmentData, MessageSummary};
 use crate::parse;
-use crate::types::{Flags, State};
+use crate::types::{FlagOp, Flags, State};
 
 /// Default page size for Email/query.
 pub const DEFAULT_PAGE_SIZE: u32 = 50;
@@ -232,6 +232,178 @@ pub async fn get_body(
     all_attachments.extend(parsed.attachments);
 
     Ok((markdown, plain, all_attachments))
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2a: Flag operations (Email/set keyword patches)
+// ---------------------------------------------------------------------------
+
+/// Apply a flag operation to an email.
+///
+/// Uses JMAP keyword patches: `keywords/$seen: true` or `keywords/$seen: null`.
+/// Setting to `null` removes the keyword (JMAP convention for patch-delete).
+pub async fn set_flag(
+    client: &JmapClient,
+    email_id: &str,
+    op: &FlagOp,
+) -> Result<(), JmapError> {
+    let patch = flag_op_to_patch(op);
+    let call = client.method(
+        "Email/set",
+        serde_json::json!({
+            "update": {
+                email_id: patch,
+            },
+        }),
+        "f0",
+    );
+
+    let resp = client.call(vec![call]).await?;
+    check_set_errors(&resp, email_id)
+}
+
+/// Apply flag operations to multiple emails in a single request.
+pub async fn set_flags_batch(
+    client: &JmapClient,
+    ops: &[(String, FlagOp)],
+) -> Result<(), JmapError> {
+    if ops.is_empty() {
+        return Ok(());
+    }
+
+    let mut update = serde_json::Map::new();
+    for (email_id, op) in ops {
+        update.insert(email_id.clone(), flag_op_to_patch(op));
+    }
+
+    let call = client.method(
+        "Email/set",
+        serde_json::json!({ "update": update }),
+        "fb0",
+    );
+
+    let resp = client.call(vec![call]).await?;
+
+    // Check for any update errors
+    let set_resp = resp.method_responses.first()
+        .ok_or_else(|| JmapError::RequestError("Empty Email/set response".into()))?;
+    if let Some(errors) = set_resp.1.get("notUpdated").and_then(|v| v.as_object()) {
+        if let Some((id, err)) = errors.iter().next() {
+            let err_type = err.get("type").and_then(|v| v.as_str()).unwrap_or("unknown");
+            return Err(JmapError::MethodError {
+                method: "Email/set".into(),
+                error_type: err_type.into(),
+                description: format!("Failed to update {id}"),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Convert a FlagOp to a JMAP keyword patch object.
+fn flag_op_to_patch(op: &FlagOp) -> Value {
+    match op {
+        FlagOp::SetSeen(true) => serde_json::json!({ "keywords/$seen": true }),
+        FlagOp::SetSeen(false) => serde_json::json!({ "keywords/$seen": null }),
+        FlagOp::SetFlagged(true) => serde_json::json!({ "keywords/$flagged": true }),
+        FlagOp::SetFlagged(false) => serde_json::json!({ "keywords/$flagged": null }),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2b: Move + Delete (Email/set mailboxIds + destroy)
+// ---------------------------------------------------------------------------
+
+/// Move an email from one mailbox to another.
+///
+/// Patches `mailboxIds` to remove the source and add the destination.
+pub async fn move_to(
+    client: &JmapClient,
+    email_id: &str,
+    from_mailbox: &str,
+    to_mailbox: &str,
+) -> Result<(), JmapError> {
+    let patch = serde_json::json!({
+        format!("mailboxIds/{from_mailbox}"): null,
+        format!("mailboxIds/{to_mailbox}"): true,
+    });
+
+    let call = client.method(
+        "Email/set",
+        serde_json::json!({
+            "update": { email_id: patch },
+        }),
+        "mv0",
+    );
+
+    let resp = client.call(vec![call]).await?;
+    check_set_errors(&resp, email_id)
+}
+
+/// Move an email to the trash mailbox.
+pub async fn trash(
+    client: &JmapClient,
+    email_id: &str,
+    current_mailbox: &str,
+    trash_mailbox: &str,
+) -> Result<(), JmapError> {
+    move_to(client, email_id, current_mailbox, trash_mailbox).await
+}
+
+/// Permanently destroy emails (cannot be undone).
+pub async fn destroy(
+    client: &JmapClient,
+    email_ids: &[String],
+) -> Result<(), JmapError> {
+    if email_ids.is_empty() {
+        return Ok(());
+    }
+
+    let call = client.method(
+        "Email/set",
+        serde_json::json!({
+            "destroy": email_ids,
+        }),
+        "d0",
+    );
+
+    let resp = client.call(vec![call]).await?;
+
+    let set_resp = resp.method_responses.first()
+        .ok_or_else(|| JmapError::RequestError("Empty Email/set response".into()))?;
+    if let Some(errors) = set_resp.1.get("notDestroyed").and_then(|v| v.as_object()) {
+        if let Some((id, err)) = errors.iter().next() {
+            let err_type = err.get("type").and_then(|v| v.as_str()).unwrap_or("unknown");
+            return Err(JmapError::MethodError {
+                method: "Email/set".into(),
+                error_type: err_type.into(),
+                description: format!("Failed to destroy {id}"),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Check Email/set response for update errors on a single email.
+fn check_set_errors(
+    resp: &crate::client::JmapResponse,
+    email_id: &str,
+) -> Result<(), JmapError> {
+    let set_resp = resp.method_responses.first()
+        .ok_or_else(|| JmapError::RequestError("Empty Email/set response".into()))?;
+
+    if let Some(errors) = set_resp.1.get("notUpdated").and_then(|v| v.as_object()) {
+        if let Some(err) = errors.get(email_id) {
+            let err_type = err.get("type").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let desc = err.get("description").and_then(|v| v.as_str()).unwrap_or("");
+            return Err(JmapError::MethodError {
+                method: "Email/set".into(),
+                error_type: err_type.into(),
+                description: desc.into(),
+            });
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -645,6 +817,73 @@ mod tests {
         assert_eq!(r["resultOf"], "q0");
         assert_eq!(r["name"], "Email/query");
         assert_eq!(r["path"], "/ids");
+    }
+
+    // -- Phase 2a: Flag operation tests --
+
+    #[test]
+    fn flag_op_seen_true_patch() {
+        let patch = flag_op_to_patch(&FlagOp::SetSeen(true));
+        assert_eq!(patch["keywords/$seen"], true);
+    }
+
+    #[test]
+    fn flag_op_seen_false_patch() {
+        let patch = flag_op_to_patch(&FlagOp::SetSeen(false));
+        assert!(patch["keywords/$seen"].is_null());
+    }
+
+    #[test]
+    fn flag_op_flagged_true_patch() {
+        let patch = flag_op_to_patch(&FlagOp::SetFlagged(true));
+        assert_eq!(patch["keywords/$flagged"], true);
+    }
+
+    #[test]
+    fn flag_op_flagged_false_patch() {
+        let patch = flag_op_to_patch(&FlagOp::SetFlagged(false));
+        assert!(patch["keywords/$flagged"].is_null());
+    }
+
+    // -- Phase 2b: Move/delete tests --
+
+    #[test]
+    fn check_set_errors_passes_on_success() {
+        let resp = crate::client::JmapResponse {
+            method_responses: vec![crate::client::MethodCall(
+                "Email/set".into(),
+                serde_json::json!({
+                    "updated": { "M001": null },
+                    "notUpdated": {}
+                }),
+                "f0".into(),
+            )],
+            session_state: None,
+        };
+        assert!(check_set_errors(&resp, "M001").is_ok());
+    }
+
+    #[test]
+    fn check_set_errors_catches_failure() {
+        let resp = crate::client::JmapResponse {
+            method_responses: vec![crate::client::MethodCall(
+                "Email/set".into(),
+                serde_json::json!({
+                    "updated": {},
+                    "notUpdated": {
+                        "M001": {
+                            "type": "notFound",
+                            "description": "Email not found"
+                        }
+                    }
+                }),
+                "f0".into(),
+            )],
+            session_state: None,
+        };
+        let err = check_set_errors(&resp, "M001").unwrap_err();
+        let err_str = format!("{err}");
+        assert!(err_str.contains("notFound"));
     }
 
     #[test]
