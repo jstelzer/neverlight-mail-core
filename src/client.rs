@@ -63,6 +63,11 @@ pub struct JmapClient {
     pub account_id: String,
 }
 
+/// Whether a `reqwest::Error` represents a transient transport failure worth retrying.
+fn is_transient_transport(e: &reqwest::Error) -> bool {
+    e.is_connect() || e.is_timeout() || e.is_request()
+}
+
 impl JmapClient {
     pub fn new(
         api_url: String,
@@ -99,6 +104,9 @@ impl JmapClient {
     }
 
     /// Execute a batch of JMAP method calls in a single HTTP POST.
+    ///
+    /// Retries automatically on HTTP 429 (rate limit) and 503 (service unavailable)
+    /// with exponential backoff (1s, 2s, 4s — max 3 retries).
     pub async fn call(&self, method_calls: Vec<MethodCall>) -> Result<JmapResponse, JmapError> {
         let request = JmapRequest {
             using: vec![
@@ -109,48 +117,81 @@ impl JmapClient {
             method_calls,
         };
 
-        let resp = self
-            .http
-            .post(&self.api_url)
-            .json(&request)
-            .send()
-            .await?;
+        let mut delay = std::time::Duration::from_secs(1);
+        let max_retries = 3u32;
 
-        if !resp.status().is_success() {
-            return Err(JmapError::RequestError(format!(
-                "HTTP {} from JMAP API",
-                resp.status()
-            )));
-        }
-
-        let jmap_resp: JmapResponse = resp.json().await?;
-
-        // Check for method-level errors
-        for mc in &jmap_resp.method_responses {
-            if mc.0 == "error" {
-                let error_type = mc.1.get("type")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown")
-                    .to_string();
-
-                if error_type == "cannotCalculateChanges" {
-                    return Err(JmapError::CannotCalculateChanges);
+        for attempt in 0..=max_retries {
+            let resp = match self
+                .http
+                .post(&self.api_url)
+                .json(&request)
+                .send()
+                .await
+            {
+                Ok(resp) => resp,
+                Err(e) if attempt < max_retries && is_transient_transport(&e) => {
+                    log::warn!(
+                        "JMAP transport error — retry {}/{} in {:?}: {}",
+                        attempt + 1, max_retries, delay, e
+                    );
+                    tokio::time::sleep(delay).await;
+                    delay *= 2;
+                    continue;
                 }
+                Err(e) => return Err(e.into()),
+            };
 
-                let description = mc.1.get("description")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
+            let status = resp.status();
 
-                return Err(JmapError::MethodError {
-                    method: mc.2.clone(),
-                    error_type,
-                    description,
-                });
+            // Retry on 429 or 503
+            if (status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                || status == reqwest::StatusCode::SERVICE_UNAVAILABLE)
+                && attempt < max_retries
+            {
+                log::warn!("JMAP HTTP {} — retry {}/{} in {:?}", status, attempt + 1, max_retries, delay);
+                tokio::time::sleep(delay).await;
+                delay *= 2;
+                continue;
             }
+
+            if !status.is_success() {
+                return Err(JmapError::RequestError(format!(
+                    "HTTP {} from JMAP API",
+                    status
+                )));
+            }
+
+            let jmap_resp: JmapResponse = resp.json().await?;
+
+            // Check for method-level errors
+            for mc in &jmap_resp.method_responses {
+                if mc.0 == "error" {
+                    let error_type = mc.1.get("type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
+                        .to_string();
+
+                    if error_type == "cannotCalculateChanges" {
+                        return Err(JmapError::CannotCalculateChanges);
+                    }
+
+                    let description = mc.1.get("description")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+
+                    return Err(JmapError::MethodError {
+                        method: mc.2.clone(),
+                        error_type,
+                        description,
+                    });
+                }
+            }
+
+            return Ok(jmap_resp);
         }
 
-        Ok(jmap_resp)
+        Err(JmapError::RequestError("Max retries exceeded".into()))
     }
 
     /// Upload a blob (RFC 8620 §6.1). Returns the blob ID.

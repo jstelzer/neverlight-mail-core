@@ -183,6 +183,132 @@ pub fn find_by_role(folders: &[Folder], role: &str) -> Option<String> {
         .map(|f| f.mailbox_id.clone())
 }
 
+// ---------------------------------------------------------------------------
+// Phase 4b: Mailbox management (Mailbox/set — RFC 8621 §2.4)
+// ---------------------------------------------------------------------------
+
+/// Create a new mailbox.
+///
+/// Returns the server-assigned mailbox ID.
+pub async fn create(
+    client: &JmapClient,
+    name: &str,
+    parent_id: Option<&str>,
+) -> Result<String, JmapError> {
+    let mut create_obj = serde_json::json!({ "name": name });
+    if let Some(pid) = parent_id {
+        create_obj["parentId"] = Value::String(pid.to_string());
+    }
+
+    let call = client.method(
+        "Mailbox/set",
+        serde_json::json!({
+            "create": { "mb": create_obj },
+        }),
+        "mc0",
+    );
+
+    let resp = client.call(vec![call]).await?;
+    let mc = resp.method_responses.iter().find(|mc| mc.2 == "mc0")
+        .ok_or_else(|| JmapError::RequestError("Missing Mailbox/set response".into()))?;
+
+    // Check for creation errors
+    if let Some(errors) = mc.1.get("notCreated").and_then(|v| v.as_object()) {
+        if let Some(err) = errors.get("mb") {
+            let err_type = err.get("type").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let desc = err.get("description").and_then(|v| v.as_str()).unwrap_or("");
+            return Err(JmapError::MethodError {
+                method: "Mailbox/set".into(),
+                error_type: err_type.into(),
+                description: desc.into(),
+            });
+        }
+    }
+
+    // Extract created ID
+    let created_id = mc.1
+        .get("created")
+        .and_then(|v| v.get("mb"))
+        .and_then(|v| v.get("id"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JmapError::RequestError("Missing created mailbox ID".into()))?;
+
+    Ok(created_id.to_string())
+}
+
+/// Rename a mailbox.
+pub async fn rename(
+    client: &JmapClient,
+    mailbox_id: &str,
+    new_name: &str,
+) -> Result<(), JmapError> {
+    let call = client.method(
+        "Mailbox/set",
+        serde_json::json!({
+            "update": {
+                mailbox_id: { "name": new_name },
+            },
+        }),
+        "mr0",
+    );
+
+    let resp = client.call(vec![call]).await?;
+    let mc = resp.method_responses.iter().find(|mc| mc.2 == "mr0")
+        .ok_or_else(|| JmapError::RequestError("Missing Mailbox/set response".into()))?;
+
+    if let Some(errors) = mc.1.get("notUpdated").and_then(|v| v.as_object()) {
+        if let Some(err) = errors.get(mailbox_id) {
+            let err_type = err.get("type").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let desc = err.get("description").and_then(|v| v.as_str()).unwrap_or("");
+            return Err(JmapError::MethodError {
+                method: "Mailbox/set".into(),
+                error_type: err_type.into(),
+                description: desc.into(),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+/// Delete a mailbox.
+///
+/// The mailbox must be empty or `on_destroy_remove_emails` must be true.
+/// When `on_destroy_remove_emails` is set, the server removes contained emails
+/// per its Mailbox/set semantics (behavior is server-defined).
+pub async fn destroy(
+    client: &JmapClient,
+    mailbox_id: &str,
+    on_destroy_remove_emails: bool,
+) -> Result<(), JmapError> {
+    let call = client.method(
+        "Mailbox/set",
+        serde_json::json!({
+            "destroy": [mailbox_id],
+            "onDestroyRemoveEmails": on_destroy_remove_emails,
+        }),
+        "md0",
+    );
+
+    let resp = client.call(vec![call]).await?;
+    let mc = resp.method_responses.iter().find(|mc| mc.2 == "md0")
+        .ok_or_else(|| JmapError::RequestError("Missing Mailbox/set response".into()))?;
+
+    if let Some(errors) = mc.1.get("notDestroyed").and_then(|v| v.as_object()) {
+        if let Some(err) = errors.get(mailbox_id) {
+            let err_type = err.get("type").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let desc = err.get("description").and_then(|v| v.as_str()).unwrap_or("");
+            return Err(JmapError::MethodError {
+                method: "Mailbox/set".into(),
+                error_type: err_type.into(),
+                description: desc.into(),
+            });
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

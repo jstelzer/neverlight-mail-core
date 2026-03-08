@@ -3,7 +3,7 @@
 //! Probes `https://{domain}/.well-known/jmap` with basic auth to determine
 //! whether a mail server supports JMAP.
 
-use crate::config::{AccountCapabilities, Protocol};
+use crate::config::AccountCapabilities;
 
 /// Probe a mail server for JMAP support.
 ///
@@ -100,7 +100,6 @@ fn parse_session_object(json: &str, domain: &str) -> Result<AccountCapabilities,
         });
 
     Ok(AccountCapabilities {
-        protocol: Protocol::Jmap,
         jmap_session_url: session_url,
         supports_push,
         supports_submission,
@@ -124,7 +123,6 @@ mod tests {
         }"#;
 
         let caps = parse_session_object(json, "fastmail.com").unwrap();
-        assert_eq!(caps.protocol, Protocol::Jmap);
         assert_eq!(
             caps.jmap_session_url.as_deref(),
             Some("https://api.fastmail.com/jmap/api/")

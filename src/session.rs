@@ -21,17 +21,17 @@ pub struct JmapSession {
 }
 
 impl JmapSession {
-    /// Connect to a JMAP server: discover session, validate capabilities,
-    /// return a ready-to-use client.
+    /// Connect to a JMAP server using an AccountConfig.
+    ///
+    /// Auto-detects auth method from token prefix:
+    /// - `fmu1-` → Bearer token (Fastmail API token)
+    /// - otherwise → Basic auth (username:token)
     pub async fn connect(config: &AccountConfig) -> Result<(Self, JmapClient), String> {
-        let session_url = config
-            .capabilities
-            .jmap_session_url
-            .as_deref()
-            .ok_or("No JMAP session URL configured")?;
-
-        let auth = basic_auth(&config.username, &config.password);
-        Self::connect_with_auth(session_url, &auth).await
+        if config.token.starts_with("fmu1-") {
+            Self::connect_with_token(&config.jmap_url, &config.token).await
+        } else {
+            Self::connect_with_basic(&config.jmap_url, &config.username, &config.token).await
+        }
     }
 
     /// Connect using a bearer token (e.g. Fastmail API token with `fmu1-` prefix).

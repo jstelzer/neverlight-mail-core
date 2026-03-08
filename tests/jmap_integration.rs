@@ -443,3 +443,104 @@ async fn session_provides_event_source_url() {
     assert!(!url.contains("{ping}"), "template vars should be replaced");
     eprintln!("Built EventSource URL: {url}");
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4a: Server-side search
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn search_by_text() {
+    skip_if_no_env!();
+    let (_session, client) = connect_client().await;
+
+    // Search for the test email we sent in Phase 2
+    let filter = email::SearchFilter {
+        text: Some("neverlight-mail-core".into()),
+        ..Default::default()
+    };
+
+    let (messages, query_result) = email::search(&client, &filter, 10)
+        .await
+        .expect("search failed");
+
+    assert!(query_result.total > 0, "should find at least one result");
+    assert!(!messages.is_empty(), "should return messages");
+
+    eprintln!(
+        "Search 'neverlight-mail-core': {} total, {} returned",
+        query_result.total,
+        messages.len()
+    );
+    for m in &messages {
+        eprintln!("  {} — {}", m.from, m.subject);
+    }
+}
+
+#[tokio::test]
+async fn search_with_mailbox_filter() {
+    skip_if_no_env!();
+    let (_session, client) = connect_client().await;
+
+    let folders = mailbox::fetch_all(&client).await.expect("fetch_all");
+    let inbox_id = mailbox::find_by_role(&folders, "inbox").expect("no inbox");
+
+    let filter = email::SearchFilter {
+        in_mailbox: Some(inbox_id.clone()),
+        text: Some("test".into()),
+        ..Default::default()
+    };
+
+    let (messages, query_result) = email::search(&client, &filter, 5)
+        .await
+        .expect("search failed");
+
+    eprintln!(
+        "Search 'test' in inbox: {} total, {} returned",
+        query_result.total,
+        messages.len()
+    );
+    // Don't assert count — may or may not have "test" in inbox
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4b: Mailbox management
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn create_rename_delete_mailbox() {
+    skip_if_no_env!();
+    let (_session, client) = connect_client().await;
+
+    // Create
+    let mailbox_id = mailbox::create(&client, "neverlight-test-folder", None)
+        .await
+        .expect("create mailbox failed");
+    assert!(!mailbox_id.is_empty());
+    eprintln!("Created mailbox: {mailbox_id}");
+
+    // Verify it appears in the list
+    let folders = mailbox::fetch_all(&client).await.expect("fetch_all");
+    let found = folders.iter().find(|f| f.mailbox_id == mailbox_id);
+    assert!(found.is_some(), "new mailbox should appear in list");
+    assert_eq!(found.unwrap().name, "neverlight-test-folder");
+
+    // Rename
+    mailbox::rename(&client, &mailbox_id, "neverlight-test-renamed")
+        .await
+        .expect("rename failed");
+
+    let folders = mailbox::fetch_all(&client).await.expect("fetch_all after rename");
+    let found = folders.iter().find(|f| f.mailbox_id == mailbox_id).unwrap();
+    assert_eq!(found.name, "neverlight-test-renamed");
+    eprintln!("Renamed to: {}", found.name);
+
+    // Delete
+    mailbox::destroy(&client, &mailbox_id, false)
+        .await
+        .expect("destroy failed");
+
+    let folders = mailbox::fetch_all(&client).await.expect("fetch_all after destroy");
+    let found = folders.iter().find(|f| f.mailbox_id == mailbox_id);
+    assert!(found.is_none(), "deleted mailbox should not appear in list");
+    eprintln!("Deleted mailbox {mailbox_id}");
+}

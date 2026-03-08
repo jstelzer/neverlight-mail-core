@@ -3,10 +3,12 @@
 //! Both TUI and GUI frontends render this model and map their input events
 //! to [`SetupInput`]. Validation, field navigation, and config persistence
 //! live here so bugs are fixed once.
+//!
+//! JMAP-only: no IMAP/SMTP fields.
 
 use crate::config::{
     new_account_id, AccountCapabilities, AccountId, ConfigNeedsInput, FileAccountConfig,
-    MultiAccountFileConfig, PasswordBackend, Protocol, SmtpOverrides,
+    MultiAccountFileConfig, PasswordBackend,
 };
 use crate::keyring;
 
@@ -17,47 +19,33 @@ use crate::keyring;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FieldId {
     Label,
-    Server,
-    Port,
+    JmapUrl,
     Username,
-    Password,
+    Token,
     Email,
-    Starttls,
-    SmtpServer,
-    SmtpPort,
-    SmtpUsername,
-    SmtpPassword,
-    SmtpStarttls,
 }
 
 impl FieldId {
     /// All fields in tab order for full setup.
     pub const FULL: &[FieldId] = &[
         Self::Label,
-        Self::Server,
-        Self::Port,
+        Self::JmapUrl,
         Self::Username,
-        Self::Password,
+        Self::Token,
         Self::Email,
-        Self::Starttls,
-        Self::SmtpServer,
-        Self::SmtpPort,
-        Self::SmtpUsername,
-        Self::SmtpPassword,
-        Self::SmtpStarttls,
     ];
 
-    /// Editable fields in password-only mode.
-    pub const PASSWORD_ONLY: &[FieldId] = &[Self::Password];
+    /// Editable fields in token-only mode.
+    pub const TOKEN_ONLY: &[FieldId] = &[Self::Token];
 
     /// Whether this field holds secret content (render masked).
     pub fn is_secret(self) -> bool {
-        matches!(self, Self::Password | Self::SmtpPassword)
+        matches!(self, Self::Token)
     }
 
     /// Whether this field is a boolean toggle rather than text.
     pub fn is_toggle(self) -> bool {
-        matches!(self, Self::Starttls | Self::SmtpStarttls)
+        false
     }
 }
 
@@ -70,10 +58,10 @@ impl FieldId {
 pub enum SetupRequest {
     /// No config file exists — full account creation.
     Full,
-    /// Config exists but password can't be resolved.
-    PasswordOnly {
+    /// Config exists but token can't be resolved.
+    TokenOnly {
         account_id: AccountId,
-        server: String,
+        jmap_url: String,
         username: String,
         reason: Option<String>,
     },
@@ -82,19 +70,18 @@ pub enum SetupRequest {
 }
 
 impl SetupRequest {
-    /// Build from the error returned by `Config::resolve_all_accounts()`.
+    /// Build from the error returned by `resolve_all_accounts()`.
     pub fn from_config_needs(needs: &ConfigNeedsInput) -> Self {
         match needs {
             ConfigNeedsInput::FullSetup => Self::Full,
-            ConfigNeedsInput::PasswordOnly {
+            ConfigNeedsInput::TokenOnly {
                 account_id,
-                server,
+                jmap_url,
                 username,
                 error,
-                ..
-            } => Self::PasswordOnly {
+            } => Self::TokenOnly {
                 account_id: account_id.clone(),
-                server: server.clone(),
+                jmap_url: jmap_url.clone(),
                 username: username.clone(),
                 reason: error.clone(),
             },
@@ -105,7 +92,7 @@ impl SetupRequest {
     pub fn editable_fields(&self) -> &[FieldId] {
         match self {
             Self::Full | Self::Edit { .. } => FieldId::FULL,
-            Self::PasswordOnly { .. } => FieldId::PASSWORD_ONLY,
+            Self::TokenOnly { .. } => FieldId::TOKEN_ONLY,
         }
     }
 
@@ -123,22 +110,11 @@ impl SetupRequest {
 /// [`update()`] with mapped input events.
 pub struct SetupModel {
     pub request: SetupRequest,
-    pub protocol: Protocol,
     pub label: String,
-    pub server: String,
-    pub port: String,
+    pub jmap_url: String,
     pub username: String,
-    pub password: String,
+    pub token: String,
     pub email: String,
-    pub starttls: bool,
-    pub smtp_server: String,
-    pub smtp_port: String,
-    pub smtp_username: String,
-    pub smtp_password: String,
-    pub smtp_starttls: bool,
-    /// When `true`, the SMTP server field auto-syncs from the IMAP server.
-    /// Set to `false` when the user explicitly edits the SMTP server field.
-    pub smtp_server_synced: bool,
     pub active_field: FieldId,
     pub error: Option<String>,
 }
@@ -150,73 +126,43 @@ impl SetupModel {
         match needs {
             ConfigNeedsInput::FullSetup => Self {
                 request,
-                protocol: Protocol::Imap,
                 label: String::new(),
-                server: String::new(),
-                port: "993".into(),
+                jmap_url: "https://api.fastmail.com/jmap/session".into(),
                 username: String::new(),
-                password: String::new(),
+                token: String::new(),
                 email: String::new(),
-                starttls: false,
-                smtp_server: String::new(),
-                smtp_port: "587".into(),
-                smtp_username: String::new(),
-                smtp_password: String::new(),
-                smtp_starttls: true,
-                smtp_server_synced: true,
-                active_field: FieldId::Server,
+                active_field: FieldId::JmapUrl,
                 error: None,
             },
-            ConfigNeedsInput::PasswordOnly {
-                server,
-                port,
+            ConfigNeedsInput::TokenOnly {
+                jmap_url,
                 username,
-                starttls,
                 error,
                 ..
             } => Self {
                 request,
-                protocol: Protocol::Imap,
                 label: String::new(),
-                server: server.clone(),
-                port: port.to_string(),
+                jmap_url: jmap_url.clone(),
                 username: username.clone(),
-                password: String::new(),
+                token: String::new(),
                 email: String::new(),
-                starttls: *starttls,
-                smtp_server: String::new(),
-                smtp_port: "587".into(),
-                smtp_username: String::new(),
-                smtp_password: String::new(),
-                smtp_starttls: true,
-                smtp_server_synced: true,
-                active_field: FieldId::Password,
+                active_field: FieldId::Token,
                 error: error.clone(),
             },
         }
     }
 
-    /// Create a setup model for editing an existing account. The caller
-    /// pre-fills fields from the account config. Password is intentionally
-    /// left empty (must be re-entered).
+    /// Create a setup model for editing an existing account.
+    /// Token is intentionally left empty (must be re-entered).
     pub fn for_edit(account_id: AccountId, fields: SetupFields) -> Self {
         Self {
             request: SetupRequest::Edit { account_id },
-            protocol: fields.protocol,
             label: fields.label,
-            server: fields.server,
-            port: fields.port,
+            jmap_url: fields.jmap_url,
             username: fields.username,
-            password: String::new(),
+            token: String::new(),
             email: fields.email,
-            starttls: fields.starttls,
-            smtp_server: fields.smtp_server,
-            smtp_port: fields.smtp_port,
-            smtp_username: fields.smtp_username,
-            smtp_password: String::new(),
-            smtp_starttls: fields.smtp_starttls,
-            smtp_server_synced: false,
-            active_field: FieldId::Server,
+            active_field: FieldId::JmapUrl,
             error: None,
         }
     }
@@ -225,7 +171,7 @@ impl SetupModel {
     pub fn title(&self) -> &str {
         match &self.request {
             SetupRequest::Full => "Account Setup",
-            SetupRequest::PasswordOnly { .. } => "Enter Password",
+            SetupRequest::TokenOnly { .. } => "Enter API Token",
             SetupRequest::Edit { .. } => "Edit Account",
         }
     }
@@ -239,38 +185,24 @@ impl SetupModel {
     pub fn field_value(&self, field: FieldId) -> &str {
         match field {
             FieldId::Label => &self.label,
-            FieldId::Server => &self.server,
-            FieldId::Port => &self.port,
+            FieldId::JmapUrl => &self.jmap_url,
             FieldId::Username => &self.username,
-            FieldId::Password => &self.password,
+            FieldId::Token => &self.token,
             FieldId::Email => &self.email,
-            FieldId::SmtpServer => &self.smtp_server,
-            FieldId::SmtpPort => &self.smtp_port,
-            FieldId::SmtpUsername => &self.smtp_username,
-            FieldId::SmtpPassword => &self.smtp_password,
-            FieldId::Starttls | FieldId::SmtpStarttls => {
-                unreachable!("toggle fields have no text value")
-            }
         }
     }
 
-    /// Mutable reference to a text field (None if toggle or readonly).
+    /// Mutable reference to a text field (None if readonly).
     fn field_mut(&mut self, field: FieldId) -> Option<&mut String> {
-        if self.is_readonly(field) || field.is_toggle() {
+        if self.is_readonly(field) {
             return None;
         }
         match field {
             FieldId::Label => Some(&mut self.label),
-            FieldId::Server => Some(&mut self.server),
-            FieldId::Port => Some(&mut self.port),
+            FieldId::JmapUrl => Some(&mut self.jmap_url),
             FieldId::Username => Some(&mut self.username),
-            FieldId::Password => Some(&mut self.password),
+            FieldId::Token => Some(&mut self.token),
             FieldId::Email => Some(&mut self.email),
-            FieldId::SmtpServer => Some(&mut self.smtp_server),
-            FieldId::SmtpPort => Some(&mut self.smtp_port),
-            FieldId::SmtpUsername => Some(&mut self.smtp_username),
-            FieldId::SmtpPassword => Some(&mut self.smtp_password),
-            FieldId::Starttls | FieldId::SmtpStarttls => None,
         }
     }
 
@@ -279,43 +211,16 @@ impl SetupModel {
         match input {
             SetupInput::NextField => self.cycle_field(1),
             SetupInput::PrevField => self.cycle_field(-1),
-            SetupInput::Toggle => {
-                if self.active_field.is_toggle() && !self.is_readonly(self.active_field) {
-                    match self.active_field {
-                        FieldId::Starttls => self.starttls = !self.starttls,
-                        FieldId::SmtpStarttls => self.smtp_starttls = !self.smtp_starttls,
-                        _ => {}
-                    }
-                }
-            }
             SetupInput::SetField(field, value) => {
-                if !self.is_readonly(field) && !field.is_toggle() {
-                    match field {
-                        FieldId::Label => self.label = value,
-                        FieldId::Server => self.server = value,
-                        FieldId::Port => self.port = value,
-                        FieldId::Username => self.username = value,
-                        FieldId::Password => self.password = value,
-                        FieldId::Email => self.email = value,
-                        FieldId::SmtpServer => {
-                            self.smtp_server_synced = value.is_empty();
-                            self.smtp_server = value;
-                        }
-                        FieldId::SmtpPort => self.smtp_port = value,
-                        FieldId::SmtpUsername => self.smtp_username = value,
-                        FieldId::SmtpPassword => self.smtp_password = value,
-                        FieldId::Starttls | FieldId::SmtpStarttls => {}
-                    }
-                    self.error = None;
-                }
-            }
-            SetupInput::SetToggle(field, value) => {
                 if !self.is_readonly(field) {
                     match field {
-                        FieldId::Starttls => self.starttls = value,
-                        FieldId::SmtpStarttls => self.smtp_starttls = value,
-                        _ => {}
+                        FieldId::Label => self.label = value,
+                        FieldId::JmapUrl => self.jmap_url = value,
+                        FieldId::Username => self.username = value,
+                        FieldId::Token => self.token = value,
+                        FieldId::Email => self.email = value,
                     }
+                    self.error = None;
                 }
             }
             SetupInput::InsertChar(c) => {
@@ -353,18 +258,18 @@ impl SetupModel {
 
     fn try_submit(&mut self) -> SetupTransition {
         match &self.request {
-            SetupRequest::PasswordOnly {
+            SetupRequest::TokenOnly {
                 account_id,
-                server,
+                jmap_url,
                 username,
                 ..
             } => {
-                if self.password.is_empty() {
-                    self.error = Some("Password is required".into());
+                if self.token.is_empty() {
+                    self.error = Some("API token is required".into());
                     return SetupTransition::Continue;
                 }
 
-                let password_backend = store_password(username, server, &self.password);
+                let token_backend = store_token(username, jmap_url, &self.token);
 
                 let mut multi = match MultiAccountFileConfig::load() {
                     Ok(Some(m)) => m,
@@ -374,7 +279,7 @@ impl SetupModel {
                     }
                 };
                 match multi.accounts.iter_mut().find(|a| a.id == *account_id) {
-                    Some(acct) => acct.password = password_backend,
+                    Some(acct) => acct.auth_token = token_backend,
                     None => {
                         self.error = Some("Account not found in config".into());
                         return SetupTransition::Continue;
@@ -388,13 +293,12 @@ impl SetupModel {
             }
 
             SetupRequest::Full => {
-                if let Some(err) = self.validate_full() {
+                if let Some(err) = self.validate() {
                     self.error = Some(err);
                     return SetupTransition::Continue;
                 }
-                let port = self.port.trim().parse::<u16>().unwrap(); // validated above
 
-                let server = self.server.trim().to_string();
+                let jmap_url = self.jmap_url.trim().to_string();
                 let username = self.username.trim().to_string();
                 let email_addresses = parse_email_list(&self.email);
                 let label = if self.label.trim().is_empty() {
@@ -404,22 +308,16 @@ impl SetupModel {
                 };
                 let account_id = new_account_id();
 
-                let password_backend = store_password(&username, &server, &self.password);
-                let smtp_pw = store_smtp_password(&account_id, &self.smtp_password);
-                let smtp = self.build_smtp_overrides(smtp_pw);
+                let token_backend = store_token(&username, &jmap_url, &self.token);
 
-                let capabilities = self.build_capabilities(&server);
                 let fac = FileAccountConfig {
                     id: account_id,
                     label,
-                    server,
-                    port,
+                    jmap_url,
                     username,
-                    starttls: self.starttls,
-                    password: password_backend,
+                    auth_token: token_backend,
                     email_addresses,
-                    smtp,
-                    capabilities,
+                    capabilities: AccountCapabilities::default(),
                 };
 
                 let mut multi = MultiAccountFileConfig::load().ok().flatten().unwrap_or(
@@ -430,7 +328,7 @@ impl SetupModel {
                 if multi
                     .accounts
                     .iter()
-                    .any(|a| a.server == fac.server && a.username == fac.username)
+                    .any(|a| a.jmap_url == fac.jmap_url && a.username == fac.username)
                 {
                     self.error = Some("Account already exists for this server/username".into());
                     return SetupTransition::Continue;
@@ -444,14 +342,12 @@ impl SetupModel {
             }
 
             SetupRequest::Edit { account_id } => {
-                // Edit doesn't require password — empty means keep existing
                 if let Some(err) = self.validate_edit() {
                     self.error = Some(err);
                     return SetupTransition::Continue;
                 }
-                let port = self.port.trim().parse::<u16>().unwrap();
 
-                let server = self.server.trim().to_string();
+                let jmap_url = self.jmap_url.trim().to_string();
                 let username = self.username.trim().to_string();
                 let email_addresses = parse_email_list(&self.email);
                 let label = if self.label.trim().is_empty() {
@@ -474,44 +370,29 @@ impl SetupModel {
                     }
                 };
 
-                // If server/username changed, keyring lookup key changes —
-                // require password so we can store it under the new key
-                let creds_changed = existing.server != server || existing.username != username;
-                if creds_changed && self.password.is_empty() {
-                    self.error = Some("Password required when changing server or username".into());
+                // If URL/username changed, require token re-entry
+                let creds_changed =
+                    existing.jmap_url != jmap_url || existing.username != username;
+                if creds_changed && self.token.is_empty() {
+                    self.error =
+                        Some("Token required when changing server URL or username".into());
                     return SetupTransition::Continue;
                 }
 
-                let password_backend = if self.password.is_empty() {
-                    existing.password.clone()
+                let token_backend = if self.token.is_empty() {
+                    existing.auth_token.clone()
                 } else {
-                    store_password(&username, &server, &self.password)
+                    store_token(&username, &jmap_url, &self.token)
                 };
 
-                // Preserve existing SMTP password if not re-entered
-                let smtp_pw = if self.smtp_password.is_empty() {
-                    existing.smtp.password.clone()
-                } else {
-                    store_smtp_password(account_id, &self.smtp_password)
-                };
-                let smtp = self.build_smtp_overrides(smtp_pw);
-
-                let capabilities = if self.protocol == existing.capabilities.protocol {
-                    existing.capabilities.clone()
-                } else {
-                    self.build_capabilities(&server)
-                };
                 let fac = FileAccountConfig {
                     id: account_id.clone(),
                     label,
-                    server,
-                    port,
+                    jmap_url,
                     username,
-                    starttls: self.starttls,
-                    password: password_backend,
+                    auth_token: token_backend,
                     email_addresses,
-                    smtp,
-                    capabilities,
+                    capabilities: existing.capabilities.clone(),
                 };
 
                 if let Some(pos) = multi.accounts.iter().position(|a| a.id == *account_id) {
@@ -529,47 +410,26 @@ impl SetupModel {
     }
 
     /// Validate the current fields. Returns `None` if valid, `Some(error)` if not.
-    /// Use this when the UI wants to validate before doing its own submit logic
-    /// (e.g., COSMIC needs to spawn an IMAP connect task after persist).
     pub fn validate(&self) -> Option<String> {
-        match &self.request {
-            SetupRequest::PasswordOnly { .. } => {
-                if self.password.is_empty() {
-                    return Some("Password is required".into());
-                }
-                None
-            }
-            SetupRequest::Full => self.validate_full(),
-            SetupRequest::Edit { .. } => self.validate_edit(),
-        }
-    }
-
-    fn validate_full(&self) -> Option<String> {
-        if self.server.trim().is_empty() {
-            return Some("Server is required".into());
+        if let Some(e) = validate_jmap_url(&self.jmap_url) {
+            return Some(e);
         }
         if self.username.trim().is_empty() {
             return Some("Username is required".into());
         }
-        if self.password.is_empty() {
-            return Some("Password is required".into());
+        if self.token.is_empty() {
+            return Some("API token is required".into());
         }
         if parse_email_list(&self.email).is_empty() {
             return Some("At least one email address is required".into());
         }
-        if self.port.trim().parse::<u16>().is_err() {
-            return Some("Port must be a number (e.g. 993)".into());
-        }
-        if !self.smtp_port.trim().is_empty() && self.smtp_port.trim().parse::<u16>().is_err() {
-            return Some("SMTP port must be a number (e.g. 587)".into());
-        }
         None
     }
 
-    /// Edit validation: same as full but password is optional (empty = keep existing).
+    /// Edit validation: token is optional (empty = keep existing).
     fn validate_edit(&self) -> Option<String> {
-        if self.server.trim().is_empty() {
-            return Some("Server is required".into());
+        if let Some(e) = validate_jmap_url(&self.jmap_url) {
+            return Some(e);
         }
         if self.username.trim().is_empty() {
             return Some("Username is required".into());
@@ -577,37 +437,7 @@ impl SetupModel {
         if parse_email_list(&self.email).is_empty() {
             return Some("At least one email address is required".into());
         }
-        if self.port.trim().parse::<u16>().is_err() {
-            return Some("Port must be a number (e.g. 993)".into());
-        }
-        if !self.smtp_port.trim().is_empty() && self.smtp_port.trim().parse::<u16>().is_err() {
-            return Some("SMTP port must be a number (e.g. 587)".into());
-        }
         None
-    }
-
-    /// Build capabilities from the declared protocol.
-    fn build_capabilities(&self, server: &str) -> AccountCapabilities {
-        match self.protocol {
-            Protocol::Imap => AccountCapabilities::default(),
-            Protocol::Jmap => AccountCapabilities {
-                protocol: Protocol::Jmap,
-                jmap_session_url: Some(format!("https://{}/.well-known/jmap", server)),
-                supports_push: false,
-                supports_submission: false,
-            },
-        }
-    }
-
-    /// Build SMTP overrides from the model's SMTP fields.
-    pub fn build_smtp_overrides(&self, password: Option<PasswordBackend>) -> SmtpOverrides {
-        SmtpOverrides {
-            server: non_empty_trimmed(&self.smtp_server),
-            port: self.smtp_port.trim().parse().ok(),
-            username: non_empty_trimmed(&self.smtp_username),
-            password,
-            use_starttls: Some(self.smtp_starttls),
-        }
     }
 }
 
@@ -622,12 +452,8 @@ pub enum SetupInput {
     NextField,
     /// Shift-Tab / move to previous editable field.
     PrevField,
-    /// Toggle the currently active field (Starttls).
-    Toggle,
     /// Set a field's entire value (for widget-based UIs like COSMIC).
     SetField(FieldId, String),
-    /// Set a toggle field's value directly.
-    SetToggle(FieldId, bool),
     /// Insert a character at cursor (for keystroke-based UIs like TUI).
     InsertChar(char),
     /// Delete last character from active text field.
@@ -658,57 +484,45 @@ pub enum SetupOutcome {
 
 /// Pre-filled field values for the Edit flow.
 pub struct SetupFields {
-    pub protocol: Protocol,
     pub label: String,
-    pub server: String,
-    pub port: String,
+    pub jmap_url: String,
     pub username: String,
     pub email: String,
-    pub starttls: bool,
-    pub smtp_server: String,
-    pub smtp_port: String,
-    pub smtp_username: String,
-    pub smtp_starttls: bool,
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Try keyring, fall back to plaintext. Public so UIs with custom submit
-/// logic (e.g., COSMIC with SMTP overrides) can reuse the same strategy.
-pub fn store_password(username: &str, server: &str, password: &str) -> PasswordBackend {
-    match keyring::set_password(username, server, password) {
+/// Store a token in keyring, fall back to plaintext.
+pub fn store_token(username: &str, jmap_url: &str, token: &str) -> PasswordBackend {
+    match keyring::set_password(username, jmap_url, token) {
         Ok(()) => {
-            log::info!("Password stored in keyring for {}@{}", username, server);
+            log::info!("Token stored in keyring for {}@{}", username, jmap_url);
             PasswordBackend::Keyring
         }
         Err(e) => {
             log::warn!("Keyring unavailable ({}), using plaintext", e);
             PasswordBackend::Plaintext {
-                value: password.to_string(),
+                value: token.to_string(),
             }
         }
     }
 }
 
-/// Store an SMTP password in the keyring. Returns `None` if the password is empty.
-pub fn store_smtp_password(account_id: &str, password: &str) -> Option<PasswordBackend> {
-    if password.is_empty() {
-        return None;
+/// Lightweight JMAP URL sanity check.
+fn validate_jmap_url(url: &str) -> Option<String> {
+    let url = url.trim();
+    if url.is_empty() {
+        return Some("JMAP session URL is required".into());
     }
-    match keyring::set_smtp_password(account_id, password) {
-        Ok(()) => {
-            log::info!("SMTP password stored in keyring");
-            Some(PasswordBackend::Keyring)
-        }
-        Err(e) => {
-            log::warn!("Failed to store SMTP password in keyring: {}", e);
-            Some(PasswordBackend::Plaintext {
-                value: password.to_string(),
-            })
-        }
+    if !url.starts_with("https://") {
+        return Some("JMAP URL must start with https://".into());
     }
+    if url.len() <= "https://".len() {
+        return Some("JMAP URL is incomplete".into());
+    }
+    None
 }
 
 /// Split a comma-separated email string into a list, trimming whitespace
@@ -719,14 +533,4 @@ fn parse_email_list(input: &str) -> Vec<String> {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect()
-}
-
-/// Return `Some(trimmed)` if non-empty, else `None`.
-fn non_empty_trimmed(s: &str) -> Option<String> {
-    let t = s.trim();
-    if t.is_empty() {
-        None
-    } else {
-        Some(t.to_string())
-    }
 }

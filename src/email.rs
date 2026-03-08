@@ -76,8 +76,9 @@ pub async fn query(
 
     let result = resp
         .method_responses
-        .first()
-        .ok_or_else(|| JmapError::RequestError("Empty response from Email/query".into()))?;
+        .iter()
+        .find(|mc| mc.2 == "q0")
+        .ok_or_else(|| JmapError::RequestError("Missing Email/query response".into()))?;
 
     parse_query_result(&result.1)
 }
@@ -393,6 +394,107 @@ pub async fn destroy(
         }
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4a: Search
+// ---------------------------------------------------------------------------
+
+/// Search filter for Email/query (RFC 8621 §4.4.1).
+///
+/// Fields are ANDed together. Only non-None fields are included in the filter.
+#[derive(Debug, Default)]
+pub struct SearchFilter {
+    /// Full-text search across subject, body, from, to, etc.
+    pub text: Option<String>,
+    /// Search in subject only.
+    pub subject: Option<String>,
+    /// Search in from addresses.
+    pub from: Option<String>,
+    /// Search in to addresses.
+    pub to: Option<String>,
+    /// Restrict to a specific mailbox.
+    pub in_mailbox: Option<String>,
+    /// Only emails with attachments.
+    pub has_attachment: Option<bool>,
+    /// Emails received after this date (RFC 3339).
+    pub after: Option<String>,
+    /// Emails received before this date (RFC 3339).
+    pub before: Option<String>,
+}
+
+impl SearchFilter {
+    fn to_json(&self) -> Value {
+        let mut filter = serde_json::Map::new();
+        if let Some(ref text) = self.text {
+            filter.insert("text".into(), Value::String(text.clone()));
+        }
+        if let Some(ref subject) = self.subject {
+            filter.insert("subject".into(), Value::String(subject.clone()));
+        }
+        if let Some(ref from) = self.from {
+            filter.insert("from".into(), Value::String(from.clone()));
+        }
+        if let Some(ref to) = self.to {
+            filter.insert("to".into(), Value::String(to.clone()));
+        }
+        if let Some(ref mailbox_id) = self.in_mailbox {
+            filter.insert("inMailbox".into(), Value::String(mailbox_id.clone()));
+        }
+        if let Some(has) = self.has_attachment {
+            filter.insert("hasAttachment".into(), Value::Bool(has));
+        }
+        if let Some(ref after) = self.after {
+            filter.insert("after".into(), Value::String(after.clone()));
+        }
+        if let Some(ref before) = self.before {
+            filter.insert("before".into(), Value::String(before.clone()));
+        }
+        Value::Object(filter)
+    }
+}
+
+/// Server-side search: Email/query with filters, then Email/get for results.
+///
+/// Returns matched messages with full summary data. Uses result references
+/// to batch query+get in a single HTTP request.
+pub async fn search(
+    client: &JmapClient,
+    filter: &SearchFilter,
+    limit: u32,
+) -> Result<(Vec<MessageSummary>, QueryResult), JmapError> {
+    let query_call = client.method(
+        "Email/query",
+        serde_json::json!({
+            "filter": filter.to_json(),
+            "sort": [{ "property": "receivedAt", "isAscending": false }],
+            "limit": limit,
+            "calculateTotal": true,
+        }),
+        "sq0",
+    );
+
+    let get_call = client.method(
+        "Email/get",
+        serde_json::json!({
+            "#ids": JmapClient::result_ref("sq0", "Email/query", "/ids"),
+            "properties": SUMMARY_PROPERTIES,
+        }),
+        "sg0",
+    );
+
+    let resp = client.call(vec![query_call, get_call]).await?;
+
+    let query_resp = resp.method_responses.iter().find(|mc| mc.2 == "sq0")
+        .ok_or_else(|| JmapError::RequestError("Missing search query response".into()))?;
+    let query_result = parse_query_result(&query_resp.1)?;
+
+    let get_resp = resp.method_responses.iter().find(|mc| mc.2 == "sg0")
+        .ok_or_else(|| JmapError::RequestError("Missing search get response".into()))?;
+    // Use empty string as fallback mailbox ID since search spans mailboxes
+    let messages = parse_email_list(&get_resp.1, "")?;
+
+    Ok((messages, query_result))
 }
 
 /// Check Email/set response for update errors on a single email.
@@ -943,5 +1045,56 @@ mod tests {
         assert_eq!(messages[0].subject, "(no subject)");
         assert_eq!(messages[0].mailbox_id, "mb-fallback");
         assert!(!messages[0].is_read);
+    }
+
+    // -- Phase 4a: Search filter tests --
+
+    #[test]
+    fn search_filter_text_only() {
+        let filter = SearchFilter {
+            text: Some("invoice".into()),
+            ..Default::default()
+        };
+        let json = filter.to_json();
+        assert_eq!(json["text"], "invoice");
+        assert!(json.get("from").is_none());
+        assert!(json.get("inMailbox").is_none());
+    }
+
+    #[test]
+    fn search_filter_combined() {
+        let filter = SearchFilter {
+            from: Some("alice@example.com".into()),
+            subject: Some("quarterly report".into()),
+            has_attachment: Some(true),
+            in_mailbox: Some("mb-inbox".into()),
+            ..Default::default()
+        };
+        let json = filter.to_json();
+        assert_eq!(json["from"], "alice@example.com");
+        assert_eq!(json["subject"], "quarterly report");
+        assert_eq!(json["hasAttachment"], true);
+        assert_eq!(json["inMailbox"], "mb-inbox");
+        assert!(json.get("text").is_none());
+    }
+
+    #[test]
+    fn search_filter_date_range() {
+        let filter = SearchFilter {
+            after: Some("2026-01-01T00:00:00Z".into()),
+            before: Some("2026-02-01T00:00:00Z".into()),
+            ..Default::default()
+        };
+        let json = filter.to_json();
+        assert_eq!(json["after"], "2026-01-01T00:00:00Z");
+        assert_eq!(json["before"], "2026-02-01T00:00:00Z");
+    }
+
+    #[test]
+    fn search_filter_empty() {
+        let filter = SearchFilter::default();
+        let json = filter.to_json();
+        let obj = json.as_object().unwrap();
+        assert!(obj.is_empty(), "default filter should produce empty object");
     }
 }

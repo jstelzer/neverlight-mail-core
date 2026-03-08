@@ -5,34 +5,6 @@ use std::path::PathBuf;
 use crate::keyring;
 
 // ---------------------------------------------------------------------------
-// Protocol — IMAP or JMAP backend selection
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Protocol {
-    Imap,
-    #[default]
-    Jmap,
-}
-
-/// Capabilities discovered during account setup.
-/// Stored alongside the account so we don't need to re-probe on every launch.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct AccountCapabilities {
-    pub protocol: Protocol,
-    /// Cached JMAP session resource URL (from `.well-known/jmap` discovery).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub jmap_session_url: Option<String>,
-    /// Whether the server advertises JMAP push (EventSource).
-    #[serde(default)]
-    pub supports_push: bool,
-    /// Whether the server advertises JMAP EmailSubmission.
-    #[serde(default)]
-    pub supports_submission: bool,
-}
-
-// ---------------------------------------------------------------------------
 // AccountId — stable UUIDv4 per account
 // ---------------------------------------------------------------------------
 
@@ -46,21 +18,22 @@ pub fn new_account_id() -> AccountId {
 pub const ENV_ACCOUNT_ID: &str = "env-account";
 
 // ---------------------------------------------------------------------------
-// SMTP overrides — per-field optional, merged onto IMAP defaults
+// Capabilities discovered during account setup
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct SmtpOverrides {
+/// Capabilities discovered during account setup.
+/// Stored alongside the account so we don't need to re-probe on every launch.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AccountCapabilities {
+    /// Cached JMAP session resource URL (from `.well-known/jmap` discovery).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub server: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub port: Option<u16>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub username: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub password: Option<PasswordBackend>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub use_starttls: Option<bool>,
+    pub jmap_session_url: Option<String>,
+    /// Whether the server advertises JMAP push (EventSource).
+    #[serde(default)]
+    pub supports_push: bool,
+    /// Whether the server advertises JMAP EmailSubmission.
+    #[serde(default)]
+    pub supports_submission: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -71,15 +44,13 @@ pub struct SmtpOverrides {
 pub struct FileAccountConfig {
     pub id: AccountId,
     pub label: String,
-    pub server: String,
-    pub port: u16,
+    /// JMAP session URL (e.g. "https://api.fastmail.com/jmap/session").
+    pub jmap_url: String,
     pub username: String,
-    pub starttls: bool,
-    pub password: PasswordBackend,
+    /// How the auth token is stored.
+    pub auth_token: PasswordBackend,
     #[serde(default)]
     pub email_addresses: Vec<String>,
-    #[serde(default)]
-    pub smtp: SmtpOverrides,
     #[serde(default)]
     pub capabilities: AccountCapabilities,
 }
@@ -94,7 +65,7 @@ pub enum PasswordBackend {
 }
 
 // ---------------------------------------------------------------------------
-// Multi-account file config (new on-disk format)
+// Multi-account file config
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,149 +74,33 @@ pub struct MultiAccountFileConfig {
 }
 
 // ---------------------------------------------------------------------------
-// Legacy single-account file config (for migration)
+// Runtime account config (resolved tokens, ready to use)
 // ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FileConfig {
-    pub server: String,
-    pub port: u16,
-    pub username: String,
-    pub starttls: bool,
-    pub password: PasswordBackend,
-    #[serde(default)]
-    pub email_addresses: Vec<String>,
-}
-
-// ---------------------------------------------------------------------------
-// Runtime SMTP config (fully resolved)
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone)]
-pub struct SmtpConfig {
-    pub server: String,
-    pub port: u16,
-    pub username: String,
-    pub password: String,
-    pub use_starttls: bool,
-}
-
-impl SmtpConfig {
-    /// Resolve SMTP config: start from IMAP defaults, overlay SmtpOverrides.
-    pub fn resolve(
-        imap_server: &str,
-        imap_username: &str,
-        imap_password: &str,
-        overrides: &SmtpOverrides,
-        account_id: &str,
-    ) -> Self {
-        let server = overrides
-            .server
-            .clone()
-            .unwrap_or_else(|| imap_server.to_string());
-        let port = overrides.port.unwrap_or(587);
-        let username = overrides
-            .username
-            .clone()
-            .unwrap_or_else(|| imap_username.to_string());
-        let password = match &overrides.password {
-            Some(PasswordBackend::Plaintext { value }) => value.clone(),
-            Some(PasswordBackend::Keyring) => {
-                keyring::get_smtp_password(account_id).unwrap_or_else(|_| imap_password.to_string())
-            }
-            None => imap_password.to_string(),
-        };
-        let use_starttls = overrides.use_starttls.unwrap_or(true);
-
-        SmtpConfig {
-            server,
-            port,
-            username,
-            password,
-            use_starttls,
-        }
-    }
-
-    /// Legacy: build from IMAP config with env var overrides (for env-var accounts).
-    pub fn from_imap_config(config: &Config) -> Self {
-        let server = std::env::var("NEVERLIGHT_MAIL_SMTP_SERVER")
-            .unwrap_or_else(|_| config.imap_server.clone());
-        let port = std::env::var("NEVERLIGHT_MAIL_SMTP_PORT")
-            .ok()
-            .and_then(|p| p.parse().ok())
-            .unwrap_or(587);
-        SmtpConfig {
-            server,
-            port,
-            username: config.username.clone(),
-            password: config.password.clone(),
-            use_starttls: true,
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Runtime account config (resolved passwords, ready to use)
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct Config {
-    pub imap_server: String,
-    pub imap_port: u16,
-    pub username: String,
-    pub password: String,
-    pub use_starttls: bool,
-    pub email_addresses: Vec<String>,
-}
 
 #[derive(Debug, Clone)]
 pub struct AccountConfig {
     pub id: AccountId,
     pub label: String,
-    pub imap_server: String,
-    pub imap_port: u16,
+    /// JMAP session URL.
+    pub jmap_url: String,
     pub username: String,
-    pub password: String,
-    pub use_starttls: bool,
+    /// Resolved auth token (bearer token or app password).
+    pub token: String,
     pub email_addresses: Vec<String>,
-    pub smtp: SmtpConfig,
-    pub smtp_overrides: SmtpOverrides,
     pub capabilities: AccountCapabilities,
 }
 
 impl AccountConfig {
-    /// Build an AccountConfig from a FileAccountConfig + resolved password.
-    pub fn from_file_account(fac: &FileAccountConfig, password: String) -> Self {
-        let smtp = SmtpConfig::resolve(&fac.server, &fac.username, &password, &fac.smtp, &fac.id);
+    /// Build an AccountConfig from a FileAccountConfig + resolved token.
+    pub fn from_file_account(fac: &FileAccountConfig, token: String) -> Self {
         AccountConfig {
             id: fac.id.clone(),
             label: fac.label.clone(),
-            imap_server: fac.server.clone(),
-            imap_port: fac.port,
+            jmap_url: fac.jmap_url.clone(),
             username: fac.username.clone(),
-            password,
-            use_starttls: fac.starttls,
+            token,
             email_addresses: fac.email_addresses.clone(),
-            smtp,
-            smtp_overrides: fac.smtp.clone(),
             capabilities: fac.capabilities.clone(),
-        }
-    }
-
-    /// Convenience: which protocol this account uses.
-    pub fn protocol(&self) -> Protocol {
-        self.capabilities.protocol
-    }
-
-    /// Convert to a legacy Config for ImapSession::connect (temporary bridge).
-    pub fn to_imap_config(&self) -> Config {
-        Config {
-            imap_server: self.imap_server.clone(),
-            imap_port: self.imap_port,
-            username: self.username.clone(),
-            password: self.password.clone(),
-            use_starttls: self.use_starttls,
-            email_addresses: self.email_addresses.clone(),
         }
     }
 }
@@ -259,13 +114,11 @@ impl AccountConfig {
 pub enum ConfigNeedsInput {
     /// No config file exists — show full setup form.
     FullSetup,
-    /// Config exists but password is missing from keyring.
-    PasswordOnly {
+    /// Config exists but token is missing from keyring.
+    TokenOnly {
         account_id: AccountId,
-        server: String,
-        port: u16,
+        jmap_url: String,
         username: String,
-        starttls: bool,
         error: Option<String>,
     },
 }
@@ -333,11 +186,10 @@ impl LayoutConfig {
 }
 
 // ---------------------------------------------------------------------------
-// Multi-account config: load / save / migrate
+// Multi-account config: load / save
 // ---------------------------------------------------------------------------
 
 impl MultiAccountFileConfig {
-    /// Load config, auto-migrating from legacy single-account format if needed.
     pub fn load() -> Result<Option<Self>, String> {
         let path = config_path();
         if !path.exists() {
@@ -345,38 +197,11 @@ impl MultiAccountFileConfig {
         }
         let data = fs::read_to_string(&path).map_err(|e| format!("read config: {e}"))?;
 
-        // Try new multi-account format first
         if let Ok(multi) = serde_json::from_str::<MultiAccountFileConfig>(&data) {
             return Ok(Some(multi));
         }
 
-        // Try legacy single-account format (JSON object with "server" key)
-        if let Ok(legacy) = serde_json::from_str::<FileConfig>(&data) {
-            log::info!("Migrating legacy single-account config to multi-account format");
-            let id = new_account_id();
-            let label = legacy.username.clone();
-            let migrated = MultiAccountFileConfig {
-                accounts: vec![FileAccountConfig {
-                    id: id.clone(),
-                    label,
-                    server: legacy.server,
-                    port: legacy.port,
-                    username: legacy.username,
-                    starttls: legacy.starttls,
-                    password: legacy.password,
-                    email_addresses: legacy.email_addresses,
-                    smtp: SmtpOverrides::default(),
-                    capabilities: AccountCapabilities::default(),
-                }],
-            };
-            // Write back migrated format
-            if let Err(e) = migrated.save() {
-                log::warn!("Failed to write migrated config: {}", e);
-            }
-            return Ok(Some(migrated));
-        }
-
-        Err("Failed to parse config file (neither multi-account nor legacy format)".into())
+        Err("Failed to parse config file".into())
     }
 
     pub fn save(&self) -> Result<(), String> {
@@ -394,120 +219,91 @@ impl MultiAccountFileConfig {
 // Config resolution
 // ---------------------------------------------------------------------------
 
-impl Config {
-    /// Try env vars. Returns None if any required var is missing.
-    fn from_env() -> Option<Self> {
-        let imap_server = std::env::var("NEVERLIGHT_MAIL_SERVER").ok()?;
-        let username = std::env::var("NEVERLIGHT_MAIL_USER").ok()?;
-        let password = std::env::var("NEVERLIGHT_MAIL_PASSWORD").ok()?;
-        let imap_port = std::env::var("NEVERLIGHT_MAIL_PORT")
-            .ok()
-            .and_then(|p| p.parse().ok())
-            .unwrap_or(993);
-        let use_starttls = std::env::var("NEVERLIGHT_MAIL_STARTTLS")
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(false);
-        let email_addresses = std::env::var("NEVERLIGHT_MAIL_FROM")
-            .ok()
-            .map(|v| {
-                v.split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        Some(Config {
-            imap_server,
-            imap_port,
-            username,
-            password,
-            use_starttls,
-            email_addresses,
-        })
+/// Resolve all configured accounts.
+///
+/// Resolution order:
+/// 1. Environment variables (`NEVERLIGHT_MAIL_JMAP_TOKEN` + `NEVERLIGHT_MAIL_USER`) → single env account
+/// 2. Config file (`~/.config/neverlight-mail/config.json`) → multi-account with keyring
+/// 3. Returns `Err(ConfigNeedsInput)` if UI input is needed
+pub fn resolve_all_accounts() -> Result<Vec<AccountConfig>, ConfigNeedsInput> {
+    // 1. Env vars → single env account (JMAP token + user)
+    if let Some(account) = account_from_env() {
+        log::info!("Config loaded from environment variables");
+        return Ok(vec![account]);
     }
 
-    /// Resolve all accounts from config.
-    pub fn resolve_all_accounts() -> Result<Vec<AccountConfig>, ConfigNeedsInput> {
-        // 1. Env vars → single env account
-        if let Some(config) = Self::from_env() {
-            log::info!("Config loaded from environment variables");
-            let smtp = SmtpConfig::from_imap_config(&config);
-            return Ok(vec![AccountConfig {
-                id: ENV_ACCOUNT_ID.to_string(),
-                label: config.username.clone(),
-                imap_server: config.imap_server.clone(),
-                imap_port: config.imap_port,
-                username: config.username.clone(),
-                password: config.password.clone(),
-                use_starttls: config.use_starttls,
-                email_addresses: config.email_addresses.clone(),
-                smtp,
-                smtp_overrides: SmtpOverrides::default(),
-                capabilities: AccountCapabilities::default(),
-            }]);
-        }
-
-        // 2. Config file
-        match MultiAccountFileConfig::load() {
-            Ok(Some(multi)) => {
-                let mut accounts = Vec::new();
-                for fac in &multi.accounts {
-                    match resolve_password(&fac.password, &fac.username, &fac.server) {
-                        Ok(password) => {
-                            accounts.push(AccountConfig::from_file_account(fac, password));
-                        }
-                        Err(e) => {
-                            log::warn!(
-                                "Failed to resolve password for account '{}': {}",
-                                fac.label,
-                                e
-                            );
-                            // Skip accounts with unresolvable passwords for now;
-                            // they can be re-entered via setup dialog
-                        }
+    // 2. Config file
+    match MultiAccountFileConfig::load() {
+        Ok(Some(multi)) => {
+            let mut accounts = Vec::new();
+            for fac in &multi.accounts {
+                match resolve_token(&fac.auth_token, &fac.username, &fac.jmap_url) {
+                    Ok(token) => {
+                        accounts.push(AccountConfig::from_file_account(fac, token));
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "Failed to resolve token for account '{}': {}",
+                            fac.label,
+                            e
+                        );
                     }
                 }
-                if accounts.is_empty() && !multi.accounts.is_empty() {
-                    // All accounts failed password resolution — show password dialog
-                    let fac = &multi.accounts[0];
-                    return Err(ConfigNeedsInput::PasswordOnly {
-                        account_id: fac.id.clone(),
-                        server: fac.server.clone(),
-                        port: fac.port,
-                        username: fac.username.clone(),
-                        starttls: fac.starttls,
-                        error: Some("Keyring unavailable for all accounts".into()),
-                    });
-                }
-                if accounts.is_empty() {
-                    return Err(ConfigNeedsInput::FullSetup);
-                }
-                Ok(accounts)
             }
-            Ok(None) => {
-                log::info!("No config file found, need full setup");
-                Err(ConfigNeedsInput::FullSetup)
+            if accounts.is_empty() && !multi.accounts.is_empty() {
+                let fac = &multi.accounts[0];
+                return Err(ConfigNeedsInput::TokenOnly {
+                    account_id: fac.id.clone(),
+                    jmap_url: fac.jmap_url.clone(),
+                    username: fac.username.clone(),
+                    error: Some("Keyring unavailable for all accounts".into()),
+                });
             }
-            Err(e) => {
-                log::warn!("Config file error: {}", e);
-                Err(ConfigNeedsInput::FullSetup)
+            if accounts.is_empty() {
+                return Err(ConfigNeedsInput::FullSetup);
             }
+            Ok(accounts)
+        }
+        Ok(None) => {
+            log::info!("No config file found, need full setup");
+            Err(ConfigNeedsInput::FullSetup)
+        }
+        Err(e) => {
+            log::warn!("Config file error: {}", e);
+            Err(ConfigNeedsInput::FullSetup)
         }
     }
+}
+
+/// Try to build an account from environment variables.
+fn account_from_env() -> Option<AccountConfig> {
+    let token = std::env::var("NEVERLIGHT_MAIL_JMAP_TOKEN").ok()?;
+    let username = std::env::var("NEVERLIGHT_MAIL_USER").ok()?;
+    let jmap_url = std::env::var("NEVERLIGHT_MAIL_JMAP_URL")
+        .unwrap_or_else(|_| "https://api.fastmail.com/jmap/session".into());
+
+    Some(AccountConfig {
+        id: ENV_ACCOUNT_ID.to_string(),
+        label: username.clone(),
+        jmap_url,
+        username,
+        token,
+        email_addresses: Vec::new(),
+        capabilities: AccountCapabilities::default(),
+    })
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn resolve_password(
+fn resolve_token(
     backend: &PasswordBackend,
     username: &str,
-    server: &str,
+    jmap_url: &str,
 ) -> Result<String, String> {
     match backend {
         PasswordBackend::Plaintext { value } => Ok(value.clone()),
-        PasswordBackend::Keyring => keyring::get_password(username, server),
+        PasswordBackend::Keyring => keyring::get_password(username, jmap_url),
     }
 }
