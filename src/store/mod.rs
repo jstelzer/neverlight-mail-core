@@ -1,5 +1,6 @@
 mod commands;
 mod flags;
+mod folder_queries;
 mod handle;
 mod queries;
 mod schema;

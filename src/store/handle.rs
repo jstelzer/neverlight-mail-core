@@ -4,6 +4,7 @@ use rusqlite::Connection;
 use tokio::sync::{mpsc, oneshot};
 
 use super::commands::CacheCmd;
+use super::folder_queries;
 use super::queries;
 use super::schema::{run_migrations, SCHEMA};
 use crate::models::{AttachmentData, Folder, MessageSummary};
@@ -282,10 +283,10 @@ fn run_loop(conn: Connection, mut rx: mpsc::UnboundedReceiver<CacheCmd>) {
                 folders,
                 reply,
             } => {
-                let _ = reply.send(queries::do_save_folders(&conn, &account_id, &folders));
+                let _ = reply.send(folder_queries::do_save_folders(&conn, &account_id, &folders));
             }
             CacheCmd::LoadFolders { account_id, reply } => {
-                let _ = reply.send(queries::do_load_folders(&conn, &account_id));
+                let _ = reply.send(folder_queries::do_load_folders(&conn, &account_id));
             }
             CacheCmd::SaveMessages {
                 account_id,
@@ -389,14 +390,14 @@ fn run_loop(conn: Connection, mut rx: mpsc::UnboundedReceiver<CacheCmd>) {
                 let _ = reply.send(queries::do_search(&conn, &query));
             }
             CacheCmd::RemoveAccount { account_id, reply } => {
-                let _ = reply.send(queries::do_remove_account(&conn, &account_id));
+                let _ = reply.send(folder_queries::do_remove_account(&conn, &account_id));
             }
             CacheCmd::GetState {
                 account_id,
                 resource,
                 reply,
             } => {
-                let _ = reply.send(queries::do_get_state(&conn, &account_id, &resource));
+                let _ = reply.send(folder_queries::do_get_state(&conn, &account_id, &resource));
             }
             CacheCmd::SetState {
                 account_id,
@@ -404,7 +405,7 @@ fn run_loop(conn: Connection, mut rx: mpsc::UnboundedReceiver<CacheCmd>) {
                 state,
                 reply,
             } => {
-                let _ = reply.send(queries::do_set_state(&conn, &account_id, &resource, &state));
+                let _ = reply.send(folder_queries::do_set_state(&conn, &account_id, &resource, &state));
             }
         }
     }

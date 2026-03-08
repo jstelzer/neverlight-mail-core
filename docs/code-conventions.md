@@ -200,6 +200,51 @@ Each module has a single responsibility. Split by **direction of data flow**, no
 
 Don't create a module until it has a reason to exist. A function that's only called in one place can live in the caller's module.
 
+### File Size Limits
+
+**Target: ≤ 400 lines per file.** If a file grows past 500 lines, split it.
+
+Rust is more verbose than Swift — type definitions, trait impls, and `#[cfg(test)]` blocks take real estate. The limit is 400, not 300, to account for this.
+
+**How to split:**
+
+When a module grows past the limit, promote it to a **directory module**:
+
+```
+// Before: one fat file
+email.rs          (1100 lines — query, body, flags, moves, helpers)
+
+// After: directory with focused submodules
+email/
+├── mod.rs        — pub use re-exports only
+├── query.rs      — query_and_get, parse_email_list
+├── body.rs       — get_body, extract_body_value, extract_attachments
+└── flags.rs      — set_flag, move_to, trash
+```
+
+**Rules:**
+
+- `mod.rs` contains **only** `pub mod` declarations and `pub use` re-exports. No logic.
+- Each submodule has a single clear responsibility. Name it after what it does, not what type it touches.
+- The public API doesn't change — callers still write `email::query_and_get(...)`. The split is internal organization, not a breaking change.
+- Move tests with the code they test. Each submodule gets its own `#[cfg(test)] mod tests` block.
+- Shared helpers used by multiple submodules go in a private `helpers.rs` or stay in `mod.rs` if they're small.
+
+**For app/UI modules** (TUI `app/mod.rs`, COSMIC `app/sync.rs`):
+
+Split by extracting match arms or handler groups into sibling files within the same `app/` directory:
+
+```
+// Before
+app/mod.rs        (900 lines — types, state, apply dispatcher)
+
+// After
+app/mod.rs        — types, state struct, with_accounts(), top-level apply() that delegates
+app/apply.rs      — BgResult match arms
+```
+
+The `apply()` function stays in `mod.rs` as a thin dispatcher that calls into the submodule. Same pattern as "match once at the boundary."
+
 ---
 
 ## Warnings Are Errors
