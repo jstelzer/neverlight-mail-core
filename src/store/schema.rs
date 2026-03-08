@@ -59,8 +59,23 @@ CREATE TABLE IF NOT EXISTS attachments (
 );
 ";
 
+/// Sync state table — added in Phase 3.
+/// Stores JMAP state tokens per (account, resource) for delta sync.
+const SYNC_STATE_DDL: &str = "
+CREATE TABLE IF NOT EXISTS sync_state (
+    account_id TEXT NOT NULL,
+    resource TEXT NOT NULL,
+    state TEXT NOT NULL,
+    PRIMARY KEY (account_id, resource)
+);
+";
+
 /// Run forward-only migrations.
 pub(super) fn run_migrations(conn: &Connection) {
+    // Sync state table
+    if let Err(e) = conn.execute_batch(SYNC_STATE_DDL) {
+        log::warn!("sync_state migration failed: {}", e);
+    }
     // Index on message_id for threading lookups
     let indexes = [
         "CREATE INDEX IF NOT EXISTS idx_messages_message_id ON messages(message_id)",

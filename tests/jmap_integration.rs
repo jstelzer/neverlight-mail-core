@@ -8,8 +8,9 @@
 //! Skipped automatically when env vars are missing.
 
 use neverlight_mail_core::session::JmapSession;
+use neverlight_mail_core::store::CacheHandle;
 use neverlight_mail_core::types::FlagOp;
-use neverlight_mail_core::{client::JmapClient, email, mailbox, submit};
+use neverlight_mail_core::{client::JmapClient, email, mailbox, push, submit, sync};
 
 const FASTMAIL_SESSION_URL: &str = "https://api.fastmail.com/jmap/session";
 
@@ -323,4 +324,122 @@ async fn send_test_email() {
 
     assert!(!email_id.is_empty(), "should return created email ID");
     eprintln!("Sent test email: id={email_id}");
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3a: Delta sync
+// ---------------------------------------------------------------------------
+
+/// Open a throwaway cache for integration tests.
+fn test_cache() -> CacheHandle {
+    CacheHandle::open("integration-test").expect("open cache")
+}
+
+#[tokio::test]
+async fn sync_mailboxes_full_then_delta() {
+    skip_if_no_env!();
+    let (_session, client) = connect_client().await;
+    let cache = test_cache();
+
+    // First sync — should do a full fetch (no prior state)
+    let folders = sync::sync_mailboxes(&client, &cache, &client.account_id)
+        .await
+        .expect("first sync failed");
+
+    assert!(!folders.is_empty(), "should have mailboxes");
+    let has_inbox = folders.iter().any(|f| f.role.as_deref() == Some("inbox"));
+    assert!(has_inbox, "should have inbox");
+
+    // State should now be persisted
+    let state = cache
+        .get_state(client.account_id.clone(), "Mailbox".to_string())
+        .await
+        .expect("get_state")
+        .expect("state should exist after first sync");
+    assert!(!state.is_empty(), "state token should be non-empty");
+    eprintln!("Mailbox state after full sync: {state}");
+
+    // Second sync — should take the delta path (state exists)
+    let folders2 = sync::sync_mailboxes(&client, &cache, &client.account_id)
+        .await
+        .expect("delta sync failed");
+
+    assert_eq!(
+        folders.len(),
+        folders2.len(),
+        "delta sync should return same folder count"
+    );
+
+    // State should still be present (possibly same, possibly updated)
+    let state2 = cache
+        .get_state(client.account_id.clone(), "Mailbox".to_string())
+        .await
+        .expect("get_state")
+        .expect("state should still exist");
+    eprintln!("Mailbox state after delta sync: {state2}");
+}
+
+#[tokio::test]
+async fn sync_emails_full_then_delta() {
+    skip_if_no_env!();
+    let (_session, client) = connect_client().await;
+    let cache = test_cache();
+
+    let folders = mailbox::fetch_all(&client).await.expect("fetch_all");
+    let inbox_id = mailbox::find_by_role(&folders, "inbox").expect("no inbox");
+
+    // First sync — may be full or delta with cannotCalculateChanges fallback
+    let messages = sync::sync_emails(&client, &cache, &client.account_id, &inbox_id, 10)
+        .await
+        .expect("first email sync failed");
+
+    assert!(!messages.is_empty(), "inbox should have messages");
+    eprintln!("Email sync: {} messages on first sync", messages.len());
+
+    let resource = format!("Email:{inbox_id}");
+    let state = cache
+        .get_state(client.account_id.clone(), resource.clone())
+        .await
+        .expect("get_state")
+        .expect("email state should exist");
+    eprintln!("Email state after full sync: {state}");
+
+    // Second sync — delta path
+    let messages2 = sync::sync_emails(&client, &cache, &client.account_id, &inbox_id, 10)
+        .await
+        .expect("delta email sync failed");
+
+    // Should return same messages from cache (no changes expected in this window)
+    assert!(!messages2.is_empty(), "delta sync should return cached messages");
+    eprintln!("Email sync: {} messages on delta sync", messages2.len());
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3b: EventSource push
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn session_provides_event_source_url() {
+    skip_if_no_env!();
+    let (_session, client) = connect_client().await;
+
+    assert!(
+        client.event_source_url.is_some(),
+        "Fastmail should provide an eventSourceUrl"
+    );
+
+    let template = client.event_source_url.as_ref().unwrap();
+    eprintln!("EventSource template: {template}");
+
+    // Fastmail's eventSourceUrl may or may not contain template variables.
+    // If it has {types}, build_event_source_url substitutes them.
+    // If not (e.g. bare URL), substitution is a no-op — query params must be appended.
+    let config = push::EventSourceConfig::default();
+    let url = push::build_event_source_url(template, &config);
+
+    assert!(!url.is_empty(), "URL should be non-empty");
+    assert!(!url.contains("{types}"), "template vars should be replaced");
+    assert!(!url.contains("{closeafter}"), "template vars should be replaced");
+    assert!(!url.contains("{ping}"), "template vars should be replaced");
+    eprintln!("Built EventSource URL: {url}");
 }

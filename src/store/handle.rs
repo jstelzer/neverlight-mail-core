@@ -229,6 +229,40 @@ impl CacheHandle {
         rx.await.map_err(|_| "Cache unavailable".to_string())?
     }
 
+    pub async fn get_state(
+        &self,
+        account_id: String,
+        resource: String,
+    ) -> Result<Option<String>, String> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(CacheCmd::GetState {
+                account_id,
+                resource,
+                reply,
+            })
+            .map_err(|_| "Cache unavailable".to_string())?;
+        rx.await.map_err(|_| "Cache unavailable".to_string())?
+    }
+
+    pub async fn set_state(
+        &self,
+        account_id: String,
+        resource: String,
+        state: String,
+    ) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(CacheCmd::SetState {
+                account_id,
+                resource,
+                state,
+                reply,
+            })
+            .map_err(|_| "Cache unavailable".to_string())?;
+        rx.await.map_err(|_| "Cache unavailable".to_string())?
+    }
+
     pub async fn search(&self, query: String) -> Result<Vec<MessageSummary>, String> {
         let (reply, rx) = oneshot::channel();
         self.tx
@@ -356,6 +390,21 @@ fn run_loop(conn: Connection, mut rx: mpsc::UnboundedReceiver<CacheCmd>) {
             }
             CacheCmd::RemoveAccount { account_id, reply } => {
                 let _ = reply.send(queries::do_remove_account(&conn, &account_id));
+            }
+            CacheCmd::GetState {
+                account_id,
+                resource,
+                reply,
+            } => {
+                let _ = reply.send(queries::do_get_state(&conn, &account_id, &resource));
+            }
+            CacheCmd::SetState {
+                account_id,
+                resource,
+                state,
+                reply,
+            } => {
+                let _ = reply.send(queries::do_set_state(&conn, &account_id, &resource, &state));
             }
         }
     }

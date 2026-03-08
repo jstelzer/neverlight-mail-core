@@ -538,6 +538,37 @@ pub(super) fn do_remove_account(conn: &Connection, account_id: &str) -> Result<(
     Ok(())
 }
 
+pub(super) fn do_get_state(
+    conn: &Connection,
+    account_id: &str,
+    resource: &str,
+) -> Result<Option<String>, String> {
+    match conn.query_row(
+        "SELECT state FROM sync_state WHERE account_id = ?1 AND resource = ?2",
+        rusqlite::params![account_id, resource],
+        |row| row.get(0),
+    ) {
+        Ok(state) => Ok(Some(state)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(format!("get_state error: {e}")),
+    }
+}
+
+pub(super) fn do_set_state(
+    conn: &Connection,
+    account_id: &str,
+    resource: &str,
+    state: &str,
+) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO sync_state (account_id, resource, state) VALUES (?1, ?2, ?3)
+         ON CONFLICT(account_id, resource) DO UPDATE SET state = excluded.state",
+        rusqlite::params![account_id, resource, state],
+    )
+    .map_err(|e| format!("set_state error: {e}"))?;
+    Ok(())
+}
+
 pub(super) fn do_search(conn: &Connection, query: &str) -> Result<Vec<MessageSummary>, String> {
     let query = query.trim();
     if query.is_empty() {

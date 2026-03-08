@@ -43,7 +43,10 @@ const BODY_PROPERTIES: &[&str] = &[
 /// Result of an Email/query call.
 pub struct QueryResult {
     pub ids: Vec<String>,
+    /// Query state (from Email/query `queryState`). Used for Email/queryChanges.
     pub state: State,
+    /// Object state (from Email/get `state`). Used for Email/changes.
+    pub get_state: Option<State>,
     pub total: u32,
     pub can_calculate_changes: bool,
 }
@@ -126,6 +129,14 @@ pub async fn query_and_get(
         .find(|mc| mc.2 == "g0")
         .ok_or_else(|| JmapError::RequestError("Missing Email/get response".into()))?;
     let messages = parse_email_list(&get_resp.1, mailbox_id)?;
+
+    // Capture the Email/get state (for Email/changes, distinct from queryState)
+    let get_state = get_resp.1
+        .get("state")
+        .and_then(|v| v.as_str())
+        .map(|s| State(s.to_string()));
+    let mut query_result = query_result;
+    query_result.get_state = get_state;
 
     Ok((messages, query_result))
 }
@@ -259,7 +270,7 @@ pub async fn set_flag(
     );
 
     let resp = client.call(vec![call]).await?;
-    check_set_errors(&resp, email_id)
+    check_set_errors(&resp, email_id, "f0")
 }
 
 /// Apply flag operations to multiple emails in a single request.
@@ -285,8 +296,8 @@ pub async fn set_flags_batch(
     let resp = client.call(vec![call]).await?;
 
     // Check for any update errors
-    let set_resp = resp.method_responses.first()
-        .ok_or_else(|| JmapError::RequestError("Empty Email/set response".into()))?;
+    let set_resp = resp.method_responses.iter().find(|mc| mc.2 == "fb0")
+        .ok_or_else(|| JmapError::RequestError("Missing Email/set response".into()))?;
     if let Some(errors) = set_resp.1.get("notUpdated").and_then(|v| v.as_object()) {
         if let Some((id, err)) = errors.iter().next() {
             let err_type = err.get("type").and_then(|v| v.as_str()).unwrap_or("unknown");
@@ -337,7 +348,7 @@ pub async fn move_to(
     );
 
     let resp = client.call(vec![call]).await?;
-    check_set_errors(&resp, email_id)
+    check_set_errors(&resp, email_id, "mv0")
 }
 
 /// Move an email to the trash mailbox.
@@ -369,8 +380,8 @@ pub async fn destroy(
 
     let resp = client.call(vec![call]).await?;
 
-    let set_resp = resp.method_responses.first()
-        .ok_or_else(|| JmapError::RequestError("Empty Email/set response".into()))?;
+    let set_resp = resp.method_responses.iter().find(|mc| mc.2 == "d0")
+        .ok_or_else(|| JmapError::RequestError("Missing Email/set response".into()))?;
     if let Some(errors) = set_resp.1.get("notDestroyed").and_then(|v| v.as_object()) {
         if let Some((id, err)) = errors.iter().next() {
             let err_type = err.get("type").and_then(|v| v.as_str()).unwrap_or("unknown");
@@ -388,9 +399,10 @@ pub async fn destroy(
 fn check_set_errors(
     resp: &crate::client::JmapResponse,
     email_id: &str,
+    call_id: &str,
 ) -> Result<(), JmapError> {
-    let set_resp = resp.method_responses.first()
-        .ok_or_else(|| JmapError::RequestError("Empty Email/set response".into()))?;
+    let set_resp = resp.method_responses.iter().find(|mc| mc.2 == call_id)
+        .ok_or_else(|| JmapError::RequestError("Missing Email/set response".into()))?;
 
     if let Some(errors) = set_resp.1.get("notUpdated").and_then(|v| v.as_object()) {
         if let Some(err) = errors.get(email_id) {
@@ -441,6 +453,7 @@ fn parse_query_result(data: &Value) -> Result<QueryResult, JmapError> {
     Ok(QueryResult {
         ids,
         state: State(state),
+        get_state: None, // populated by query_and_get from Email/get response
         total,
         can_calculate_changes,
     })
@@ -646,8 +659,29 @@ fn parse_rfc3339_simple(s: &str) -> Option<i64> {
         0
     };
     let total_days = days + month_days[(month - 1) as usize] + day - 1 + leap;
+    let utc_secs = total_days * 86400 + hour * 3600 + min * 60 + sec;
 
-    Some(total_days * 86400 + hour * 3600 + min * 60 + sec)
+    // Parse timezone offset: Z, +HH:MM, or -HH:MM
+    let tz_part = &s[19..];
+    let offset_secs = parse_tz_offset(tz_part);
+
+    Some(utc_secs - offset_secs)
+}
+
+/// Parse a timezone offset like "+02:00", "-05:30", or "Z" into seconds.
+fn parse_tz_offset(s: &str) -> i64 {
+    let s = s.trim();
+    if s.is_empty() || s == "Z" || s == "z" {
+        return 0;
+    }
+    let sign: i64 = if s.starts_with('-') { -1 } else { 1 };
+    let s = &s[1..]; // skip +/-
+    if s.len() < 5 {
+        return 0;
+    }
+    let oh: i64 = s[0..2].parse().unwrap_or(0);
+    let om: i64 = s[3..5].parse().unwrap_or(0);
+    sign * (oh * 3600 + om * 60)
 }
 
 #[cfg(test)]
@@ -806,6 +840,16 @@ mod tests {
     }
 
     #[test]
+    fn rfc3339_with_timezone_offset() {
+        let utc = parse_rfc3339_timestamp("2026-01-15T10:30:00Z");
+        let plus2 = parse_rfc3339_timestamp("2026-01-15T12:30:00+02:00");
+        let minus5 = parse_rfc3339_timestamp("2026-01-15T05:30:00-05:00");
+        // All represent the same instant
+        assert_eq!(utc, plus2);
+        assert_eq!(utc, minus5);
+    }
+
+    #[test]
     fn rfc3339_invalid_returns_zero() {
         assert_eq!(parse_rfc3339_timestamp(""), 0);
         assert_eq!(parse_rfc3339_timestamp("not-a-date"), 0);
@@ -860,7 +904,7 @@ mod tests {
             )],
             session_state: None,
         };
-        assert!(check_set_errors(&resp, "M001").is_ok());
+        assert!(check_set_errors(&resp, "M001", "f0").is_ok());
     }
 
     #[test]
@@ -881,7 +925,7 @@ mod tests {
             )],
             session_state: None,
         };
-        let err = check_set_errors(&resp, "M001").unwrap_err();
+        let err = check_set_errors(&resp, "M001", "f0").unwrap_err();
         let err_str = format!("{err}");
         assert!(err_str.contains("notFound"));
     }

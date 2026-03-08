@@ -70,4 +70,15 @@ pub(super) enum CacheCmd {
         account_id: String,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    GetState {
+        account_id: String,
+        resource: String,
+        reply: oneshot::Sender<Result<Option<String>, String>>,
+    },
+    SetState {
+        account_id: String,
+        resource: String,
+        state: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
 }

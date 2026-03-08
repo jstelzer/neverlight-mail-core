@@ -36,20 +36,21 @@ pub async fn fetch_all(client: &JmapClient) -> Result<Vec<Folder>, JmapError> {
 
     let list = resp
         .method_responses
-        .first()
+        .iter()
+        .find(|mc| mc.2 == "m0")
         .and_then(|mc| mc.1.get("list"))
         .and_then(|v| v.as_array())
         .ok_or_else(|| {
             JmapError::RequestError("Missing list in Mailbox/get response".into())
         })?;
 
-    parse_mailboxes(list)
+    parse_mailboxes_from_list(list)
 }
 
 /// Parse the Mailbox/get `list` array into `Vec<Folder>`.
 ///
 /// Builds hierarchical path names from `parentId` references.
-fn parse_mailboxes(list: &[Value]) -> Result<Vec<Folder>, JmapError> {
+pub fn parse_mailboxes_from_list(list: &[Value]) -> Result<Vec<Folder>, JmapError> {
     // First pass: collect raw mailbox data
     let mut raw: Vec<RawMailbox> = Vec::with_capacity(list.len());
     for item in list {
@@ -255,7 +256,7 @@ mod tests {
     #[test]
     fn parses_mailbox_list() {
         let list = sample_mailbox_list();
-        let folders = parse_mailboxes(&list).unwrap();
+        let folders = parse_mailboxes_from_list(&list).unwrap();
 
         assert_eq!(folders.len(), 6);
 
@@ -269,7 +270,7 @@ mod tests {
     #[test]
     fn sorts_by_role_priority() {
         let list = sample_mailbox_list();
-        let folders = parse_mailboxes(&list).unwrap();
+        let folders = parse_mailboxes_from_list(&list).unwrap();
 
         // Inbox should be first, then drafts, sent, trash, then custom
         assert_eq!(folders[0].role.as_deref(), Some("inbox"));
@@ -281,7 +282,7 @@ mod tests {
     #[test]
     fn builds_hierarchical_paths() {
         let list = sample_mailbox_list();
-        let folders = parse_mailboxes(&list).unwrap();
+        let folders = parse_mailboxes_from_list(&list).unwrap();
 
         let alpha = folders.iter().find(|f| f.mailbox_id == "mb-proj-alpha").unwrap();
         assert_eq!(alpha.path, "Projects/Alpha");
@@ -294,7 +295,7 @@ mod tests {
     #[test]
     fn find_by_role_works() {
         let list = sample_mailbox_list();
-        let folders = parse_mailboxes(&list).unwrap();
+        let folders = parse_mailboxes_from_list(&list).unwrap();
 
         assert_eq!(find_by_role(&folders, "inbox"), Some("mb-inbox".to_string()));
         assert_eq!(find_by_role(&folders, "trash"), Some("mb-trash".to_string()));
@@ -303,7 +304,7 @@ mod tests {
 
     #[test]
     fn handles_empty_list() {
-        let folders = parse_mailboxes(&[]).unwrap();
+        let folders = parse_mailboxes_from_list(&[]).unwrap();
         assert!(folders.is_empty());
     }
 
@@ -317,7 +318,7 @@ mod tests {
         ]))
         .unwrap();
 
-        let folders = parse_mailboxes(&list).unwrap();
+        let folders = parse_mailboxes_from_list(&list).unwrap();
         assert_eq!(folders.len(), 1);
         assert_eq!(folders[0].name, "Test");
         assert!(folders[0].role.is_none());
