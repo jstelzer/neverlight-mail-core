@@ -90,6 +90,7 @@ impl JmapClient {
 
         let http = reqwest::Client::builder()
             .default_headers(headers)
+            .timeout(std::time::Duration::from_secs(60))
             .build()
             .expect("build reqwest client");
 
