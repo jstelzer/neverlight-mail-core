@@ -34,9 +34,15 @@ impl JmapSession {
         Self::connect_with_auth(session_url, &auth).await
     }
 
-    /// Connect using a bearer token (e.g. Fastmail API token).
+    /// Connect using a bearer token (e.g. Fastmail API token with `fmu1-` prefix).
     pub async fn connect_with_token(session_url: &str, token: &str) -> Result<(Self, JmapClient), String> {
         let auth = format!("Bearer {token}");
+        Self::connect_with_auth(session_url, &auth).await
+    }
+
+    /// Connect using basic auth (e.g. Fastmail app password with `mu1-` prefix).
+    pub async fn connect_with_basic(session_url: &str, username: &str, password: &str) -> Result<(Self, JmapClient), String> {
+        let auth = basic_auth(username, password);
         Self::connect_with_auth(session_url, &auth).await
     }
 
