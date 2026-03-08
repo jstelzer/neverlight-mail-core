@@ -31,11 +31,20 @@ impl JmapSession {
             .ok_or("No JMAP session URL configured")?;
 
         let auth = basic_auth(&config.username, &config.password);
+        Self::connect_with_auth(session_url, &auth).await
+    }
 
+    /// Connect using a bearer token (e.g. Fastmail API token).
+    pub async fn connect_with_token(session_url: &str, token: &str) -> Result<(Self, JmapClient), String> {
+        let auth = format!("Bearer {token}");
+        Self::connect_with_auth(session_url, &auth).await
+    }
+
+    async fn connect_with_auth(session_url: &str, auth: &str) -> Result<(Self, JmapClient), String> {
         let http = reqwest::Client::new();
         let resp = http
             .get(session_url)
-            .header("Authorization", &auth)
+            .header("Authorization", auth)
             .send()
             .await
             .map_err(|e| format!("JMAP session fetch failed: {e}"))?;
@@ -56,7 +65,7 @@ impl JmapSession {
             session.download_url.clone(),
             session.event_source_url.clone(),
             session.account_id.clone(),
-            auth,
+            auth.to_string(),
         );
 
         Ok((session, client))

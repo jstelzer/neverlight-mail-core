@@ -77,10 +77,10 @@ List emails in a mailbox, fetch metadata for display.
 
 Download full message body for reading.
 
-| RFC reference | Method |
-|---|---|
+| RFC reference | Method                 |
+|---------------|------------------------|
 | RFC 8621 §4.2 | Email/get (bodyValues) |
-| RFC 8620 §6.2 | Blob download |
+| RFC 8620 §6.2 | Blob download          |
 
 **Two strategies (try bodyValues first, fall back to blob):**
 
@@ -118,8 +118,8 @@ Download full message body for reading.
 
 Toggle read/unread, star/unstar, archive.
 
-| RFC reference | Method |
-|---|---|
+| RFC reference | Method                     |
+|---------------|----------------------------|
 | RFC 8621 §4.3 | Email/set (keywords patch) |
 
 **Implementation:**
@@ -141,8 +141,8 @@ Toggle read/unread, star/unstar, archive.
 
 Move between mailboxes, trash, permanent delete.
 
-| RFC reference | Method |
-|---|---|
+| RFC reference | Method                       |
+|---------------|------------------------------|
 | RFC 8621 §4.3 | Email/set (mailboxIds patch) |
 
 **Implementation:**
@@ -162,10 +162,10 @@ Move between mailboxes, trash, permanent delete.
 
 Compose and send via JMAP (no SMTP).
 
-| RFC reference | Method |
-|---|---|
-| RFC 8621 §7 | EmailSubmission/set |
-| RFC 8621 §6 | Identity/get |
+| RFC reference | Method              |
+|---------------|---------------------|
+| RFC 8621 §7   | EmailSubmission/set |
+| RFC 8621 §6   | Identity/get        |
 
 **Implementation:**
 - `submit::get_identities(client) -> Vec<Identity>` — fetch available sender identities
@@ -197,10 +197,10 @@ Compose and send via JMAP (no SMTP).
 
 Efficient polling: only fetch what changed since last sync.
 
-| RFC reference | Method |
-|---|---|
-| RFC 8620 §5.2 | Foo/changes |
-| RFC 8621 §4.5 | Email/changes |
+| RFC reference | Method          |
+|---------------|-----------------|
+| RFC 8620 §5.2 | Foo/changes     |
+| RFC 8621 §4.5 | Email/changes   |
 | RFC 8621 §2.5 | Mailbox/changes |
 
 **Implementation:**
@@ -238,8 +238,8 @@ Persist sync state tokens.
 
 Real-time notifications via SSE (replaces IMAP IDLE).
 
-| RFC reference | Method |
-|---|---|
+| RFC reference | Method      |
+|---------------|-------------|
 | RFC 8620 §7.3 | EventSource |
 
 **Implementation:**
@@ -272,9 +272,10 @@ Real-time notifications via SSE (replaces IMAP IDLE).
 
 **Module:** `email.rs`
 
-| RFC reference | Method |
-|---|---|
+| RFC reference | Method               |
+|---------------|----------------------|
 | RFC 8621 §4.4 | Email/query (filter) |
+
 
 **Implementation:**
 - `email::search(client, query_text, mailbox_id?) -> Vec<EmailId>` — `Email/query` with `filter: { text: "..." }` (full-text) or structured filters (`from`, `to`, `subject`, `hasAttachment`, `before`, `after`)
@@ -289,8 +290,8 @@ Real-time notifications via SSE (replaces IMAP IDLE).
 
 **Module:** `mailbox.rs`
 
-| RFC reference | Method |
-|---|---|
+| RFC reference | Method      |
+|---------------|-------------|
 | RFC 8621 §2.4 | Mailbox/set |
 
 **Implementation:**
