@@ -126,6 +126,53 @@ pub(super) fn run_migrations(conn: &Connection) {
     if let Err(e) = conn.execute("INSERT INTO message_fts(message_fts) VALUES('rebuild')", []) {
         log::warn!("FTS5 rebuild failed: {}", e);
     }
+
+    // Invalidate cached rendered bodies so they re-render through the updated
+    // html-safe-md pipeline. Only runs once: skips if bodies are already NULL.
+    migrate_invalidate_body_cache(conn);
+}
+
+/// One-shot migration: NULL out cached body columns to force re-rendering.
+///
+/// The rendering pipeline (html-safe-md) changed — cached bodies from older
+/// runs contain layout table decoration, leaked CSS, and raw tracking URLs.
+/// Setting them to NULL causes the cache-first path to miss, triggering a
+/// fresh render on next view.
+fn migrate_invalidate_body_cache(conn: &Connection) {
+    // Check if there's anything to invalidate
+    let has_stale: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM messages WHERE body_rendered IS NOT NULL OR body_markdown IS NOT NULL)",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+
+    if !has_stale {
+        return;
+    }
+
+    // Use a marker table to ensure this only runs once
+    let already_done: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='_body_cache_v2')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+
+    if already_done {
+        return;
+    }
+
+    log::info!("Invalidating cached email bodies for re-rendering (pipeline update)");
+    if let Err(e) = conn.execute_batch(
+        "UPDATE messages SET body_rendered = NULL, body_markdown = NULL;
+         CREATE TABLE IF NOT EXISTS _body_cache_v2 (migrated INTEGER DEFAULT 1);
+         INSERT INTO _body_cache_v2 VALUES (1);"
+    ) {
+        log::warn!("Body cache invalidation failed: {}", e);
+    }
 }
 
 #[cfg(test)]

@@ -54,4 +54,4 @@ let folders = session.fetch_folders().await?;
 
 ## License
 
-GPL-3.0-or-later
+MIT OR Apache-2.0

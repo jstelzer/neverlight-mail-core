@@ -189,6 +189,93 @@ mod tests {
         assert!(result.contains("testfamily.1password.com"));
     }
 
+    // ── Real-world fixture: Dentist marketing email ─────────────
+    //
+    // HTML-only (no text/plain part), Mailchimp template with nested
+    // layout tables, MSO conditionals, inline styles, tracking URLs.
+
+    const DENTIST_HTML: &str = include_str!("../tests/fixtures/dentist_marketing_html.txt");
+
+    #[test]
+    fn dentist_html_renders_body_content() {
+        let result = render_body_markdown(None, Some(DENTIST_HTML));
+        assert!(result.contains("Dear PATIENT_NAME"));
+        assert!(result.contains("dental appointment"));
+        assert!(result.contains("Noble Dentistry"));
+    }
+
+    #[test]
+    fn dentist_html_no_escaped_underscores() {
+        let result = render_body_markdown(None, Some(DENTIST_HTML));
+        assert!(
+            !result.contains("\\_"),
+            "backslash-escaped underscores should be cleaned up"
+        );
+    }
+
+    #[test]
+    fn dentist_html_strips_long_tracking_urls() {
+        let result = render_body_markdown(None, Some(DENTIST_HTML));
+        assert!(
+            !result.contains("mandrillapp.com/track/click"),
+            "tracking redirect URLs should be stripped"
+        );
+    }
+
+    #[test]
+    fn dentist_html_footer_has_line_breaks() {
+        let result = render_body_markdown(None, Some(DENTIST_HTML));
+        // Footer sections should be on separate lines, not one blob
+        assert!(
+            result.contains("Noble Dentistry")
+                && result.contains('\n'),
+            "footer content should have line breaks between sections"
+        );
+    }
+
+    #[test]
+    fn dentist_plain_text_no_css_or_decoration() {
+        let result = render_body(None, Some(DENTIST_HTML));
+        assert!(
+            !result.contains("border-collapse"),
+            "CSS leaking into plain text output"
+        );
+        assert!(
+            !result.contains("────"),
+            "box-drawing decoration should be stripped"
+        );
+        assert!(result.contains("dental appointment"));
+    }
+
+    #[test]
+    fn dentist_plain_text_strips_long_tracking_urls() {
+        let result = render_body(None, Some(DENTIST_HTML));
+        assert!(
+            !result.contains("mandrillapp.com/track/click"),
+            "tracking redirect URLs should be stripped from plain text"
+        );
+    }
+
+    #[test]
+    fn dentist_plain_text_reasonable_size() {
+        let result = render_body(None, Some(DENTIST_HTML));
+        assert!(
+            result.len() < 2_000,
+            "plain text output too large ({} bytes)",
+            result.len()
+        );
+    }
+
+    #[test]
+    fn dentist_html_output_is_reasonable_size() {
+        let result = render_body_markdown(None, Some(DENTIST_HTML));
+        assert!(
+            result.len() < 2_000,
+            "output too large ({} bytes) — cruft leaking through",
+            result.len()
+        );
+    }
+
     #[test]
     fn invoice_html_output_is_reasonable_size() {
         let result = render_body_markdown(None, Some(FIXTURE_HTML));

@@ -55,8 +55,8 @@ pub async fn get_body(
     let text_body = email.get("textBody").and_then(|v| v.as_array());
     let html_body = email.get("htmlBody").and_then(|v| v.as_array());
 
-    let text_plain = extract_body_value(body_values, text_body);
-    let text_html = extract_body_value(body_values, html_body);
+    let text_plain = extract_body_value(body_values, text_body, "text/plain");
+    let text_html = extract_body_value(body_values, html_body, "text/html");
 
     if text_plain.is_some() || text_html.is_some() {
         let markdown = mime::render_body_markdown(text_plain.as_deref(), text_html.as_deref());
@@ -91,14 +91,26 @@ pub async fn get_body(
 }
 
 /// Extract body text from bodyValues using the part IDs in textBody/htmlBody.
+///
+/// `expected_type` filters parts by MIME type ("text/plain" or "text/html").
+/// Without this, HTML-only emails return raw HTML via `textBody` (RFC 8621
+/// populates textBody with the only body part even if it's text/html),
+/// which then bypasses sanitization because `is_junk_plain` sees a long
+/// multi-line string and treats it as real plain text.
 fn extract_body_value(
     body_values: Option<&serde_json::Map<String, Value>>,
     body_parts: Option<&Vec<Value>>,
+    expected_type: &str,
 ) -> Option<String> {
     let values = body_values?;
     let parts = body_parts?;
     let mut combined = String::new();
     for part in parts {
+        // Only accept parts whose MIME type matches what we expect
+        let mime = part.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if mime != expected_type {
+            continue;
+        }
         let Some(part_id) = part.get("partId").and_then(|v| v.as_str()) else {
             continue;
         };
@@ -240,10 +252,43 @@ mod tests {
         let text_body = email.get("textBody").and_then(|v| v.as_array());
         let html_body = email.get("htmlBody").and_then(|v| v.as_array());
 
-        let plain = extract_body_value(body_values, text_body);
-        let html = extract_body_value(body_values, html_body);
+        let plain = extract_body_value(body_values, text_body, "text/plain");
+        let html = extract_body_value(body_values, html_body, "text/html");
 
         assert_eq!(plain.as_deref(), Some("Hello, this is the plain text body."));
         assert!(html.unwrap().contains("<strong>HTML</strong>"));
+    }
+
+    /// HTML-only email: textBody and htmlBody both reference the same HTML part.
+    /// Before the type filter, text_plain got the raw HTML and bypassed sanitization.
+    #[test]
+    fn html_only_email_does_not_leak_html_as_plain() {
+        let html_content = "<style>.foo{color:red}</style><p>Hello <strong>world</strong></p>";
+        let data = serde_json::json!({
+            "accountId": "u1234",
+            "list": [{
+                "id": "M002",
+                "blobId": "B002",
+                "bodyValues": {
+                    "1": { "value": html_content, "isEncodingProblem": false }
+                },
+                "textBody": [{ "partId": "1", "type": "text/html" }],
+                "htmlBody": [{ "partId": "1", "type": "text/html" }],
+                "attachments": []
+            }]
+        });
+        let email = data["list"][0].clone();
+        let body_values = email.get("bodyValues").and_then(|v| v.as_object());
+        let text_body = email.get("textBody").and_then(|v| v.as_array());
+        let html_body = email.get("htmlBody").and_then(|v| v.as_array());
+
+        let plain = extract_body_value(body_values, text_body, "text/plain");
+        let html = extract_body_value(body_values, html_body, "text/html");
+
+        // text_plain must be None — the part is text/html, not text/plain
+        assert!(plain.is_none(), "HTML part leaked into text_plain: {:?}", plain);
+        // text_html should have the content
+        assert!(html.is_some());
+        assert!(html.unwrap().contains("Hello"));
     }
 }
