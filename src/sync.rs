@@ -167,6 +167,17 @@ async fn sync_emails_full(
         messages.clone(),
     ).await;
 
+    // Prune messages no longer on the server (deleted/moved away)
+    let live_ids: Vec<String> = messages.iter().map(|m| m.email_id.clone()).collect();
+    let pruned = cache.prune_mailbox(
+        account_id.to_string(),
+        mailbox_id.to_string(),
+        live_ids,
+    ).await.unwrap_or(0);
+    if pruned > 0 {
+        log::info!("Pruned {pruned} stale messages from {mailbox_id}");
+    }
+
     // Store the Email/get state (for Email/changes), not the queryState
     let state = query_result.get_state
         .as_ref()

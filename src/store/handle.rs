@@ -225,6 +225,24 @@ impl CacheHandle {
         rx.await.map_err(|_| "Cache unavailable".to_string())?
     }
 
+    pub async fn prune_mailbox(
+        &self,
+        account_id: String,
+        mailbox_id: String,
+        live_email_ids: Vec<String>,
+    ) -> Result<u64, String> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(CacheCmd::PruneMailbox {
+                account_id,
+                mailbox_id,
+                live_email_ids,
+                reply,
+            })
+            .map_err(|_| "Cache unavailable".to_string())?;
+        rx.await.map_err(|_| "Cache unavailable".to_string())?
+    }
+
     pub async fn remove_message(
         &self,
         account_id: String,
@@ -404,6 +422,19 @@ fn run_loop(conn: Connection, mut rx: mpsc::UnboundedReceiver<CacheCmd>) {
                 reply,
             } => {
                 let _ = reply.send(queries::do_remove_message(&conn, &account_id, &email_id));
+            }
+            CacheCmd::PruneMailbox {
+                account_id,
+                mailbox_id,
+                live_email_ids,
+                reply,
+            } => {
+                let _ = reply.send(queries::do_prune_mailbox(
+                    &conn,
+                    &account_id,
+                    &mailbox_id,
+                    &live_email_ids,
+                ));
             }
             CacheCmd::Search { query, reply } => {
                 let _ = reply.send(queries::do_search(&conn, &query));

@@ -62,6 +62,12 @@ pub(super) enum CacheCmd {
         email_id: String,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    PruneMailbox {
+        account_id: String,
+        mailbox_id: String,
+        live_email_ids: Vec<String>,
+        reply: oneshot::Sender<Result<u64, String>>,
+    },
     Search {
         query: String,
         reply: oneshot::Sender<Result<Vec<MessageSummary>, String>>,

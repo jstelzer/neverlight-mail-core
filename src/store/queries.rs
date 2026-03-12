@@ -345,6 +345,47 @@ pub(super) fn do_remove_message(
     Ok(())
 }
 
+/// Remove cached messages for a mailbox that are not in the given set of live email IDs.
+/// Used after a full sync to prune messages that were deleted server-side.
+pub(super) fn do_prune_mailbox(
+    conn: &Connection,
+    account_id: &str,
+    mailbox_id: &str,
+    live_email_ids: &[String],
+) -> Result<u64, String> {
+    if live_email_ids.is_empty() {
+        // Full mailbox is empty — delete everything for this mailbox
+        let deleted = conn
+            .execute(
+                "DELETE FROM messages WHERE account_id = ?1 AND mailbox_id = ?2",
+                rusqlite::params![account_id, mailbox_id],
+            )
+            .map_err(|e| format!("Cache prune error: {e}"))?;
+        return Ok(deleted as u64);
+    }
+
+    let placeholders: Vec<String> = (0..live_email_ids.len())
+        .map(|i| format!("?{}", i + 3))
+        .collect();
+    let sql = format!(
+        "DELETE FROM messages WHERE account_id = ?1 AND mailbox_id = ?2 AND email_id NOT IN ({})",
+        placeholders.join(", ")
+    );
+
+    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    params.push(Box::new(account_id.to_string()));
+    params.push(Box::new(mailbox_id.to_string()));
+    for id in live_email_ids {
+        params.push(Box::new(id.clone()));
+    }
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+
+    let deleted = conn
+        .execute(&sql, param_refs.as_slice())
+        .map_err(|e| format!("Cache prune error: {e}"))?;
+    Ok(deleted as u64)
+}
+
 /// Load all messages in a thread across the given mailbox IDs, sorted by timestamp ASC.
 pub(super) fn do_load_thread(
     conn: &Connection,
@@ -449,8 +490,8 @@ mod tests {
     use rusqlite::Connection;
 
     use super::{
-        do_load_body, do_load_messages, do_remove_message, do_save_body,
-        do_save_messages, do_update_flags,
+        do_load_body, do_load_messages, do_prune_mailbox, do_remove_message,
+        do_save_body, do_save_messages, do_update_flags,
     };
     use crate::models::{AttachmentData, Folder, MessageSummary};
     use crate::store::folder_queries::do_save_folders;
@@ -546,5 +587,125 @@ mod tests {
         let b_after_remove = do_load_messages(&conn, "b", "mb1", 50, 0).expect("load b removed");
         assert!(a_after_remove.is_empty());
         assert_eq!(b_after_remove.len(), 1);
+    }
+
+    #[test]
+    fn prune_removes_stale_messages() {
+        let conn = setup_conn();
+        do_save_folders(&conn, "a", &[sample_folder("mb1")]).expect("save folder");
+
+        let mut m1 = sample_message("e1", "mb1", "msg 1");
+        m1.timestamp = 100;
+        let mut m2 = sample_message("e2", "mb1", "msg 2");
+        m2.timestamp = 200;
+        let mut m3 = sample_message("e3", "mb1", "msg 3");
+        m3.timestamp = 300;
+        do_save_messages(&conn, "a", "mb1", &[m1, m2, m3]).expect("save");
+
+        let before = do_load_messages(&conn, "a", "mb1", 50, 0).expect("load before");
+        assert_eq!(before.len(), 3);
+
+        // Server now only has e1 and e3 (e2 was deleted)
+        let pruned = do_prune_mailbox(&conn, "a", "mb1", &["e1".into(), "e3".into()])
+            .expect("prune");
+        assert_eq!(pruned, 1);
+
+        let after = do_load_messages(&conn, "a", "mb1", 50, 0).expect("load after");
+        assert_eq!(after.len(), 2);
+        let ids: Vec<&str> = after.iter().map(|m| m.email_id.as_str()).collect();
+        assert!(ids.contains(&"e1"));
+        assert!(ids.contains(&"e3"));
+        assert!(!ids.contains(&"e2"));
+    }
+
+    #[test]
+    fn prune_with_empty_live_set_clears_mailbox() {
+        let conn = setup_conn();
+        do_save_folders(&conn, "a", &[sample_folder("mb1")]).expect("save folder");
+
+        do_save_messages(&conn, "a", "mb1", &[
+            sample_message("e1", "mb1", "msg 1"),
+            sample_message("e2", "mb1", "msg 2"),
+        ]).expect("save");
+
+        let pruned = do_prune_mailbox(&conn, "a", "mb1", &[]).expect("prune");
+        assert_eq!(pruned, 2);
+
+        let after = do_load_messages(&conn, "a", "mb1", 50, 0).expect("load after");
+        assert!(after.is_empty());
+    }
+
+    fn sample_folder_named(mailbox_id: &str, name: &str) -> Folder {
+        Folder {
+            name: name.into(),
+            path: name.into(),
+            unread_count: 0,
+            total_count: 0,
+            mailbox_id: mailbox_id.to_string(),
+            role: None,
+            sort_order: 0,
+        }
+    }
+
+    #[test]
+    fn prune_does_not_affect_other_mailboxes() {
+        let conn = setup_conn();
+        do_save_folders(&conn, "a", &[
+            sample_folder_named("mb1", "INBOX"),
+            sample_folder_named("mb2", "Sent"),
+        ]).expect("save folders");
+
+        do_save_messages(&conn, "a", "mb1", &[sample_message("e1", "mb1", "inbox msg")])
+            .expect("save mb1");
+        do_save_messages(&conn, "a", "mb2", &[sample_message("e2", "mb2", "sent msg")])
+            .expect("save mb2");
+
+        // Prune mb1 with empty live set — should not touch mb2
+        let pruned = do_prune_mailbox(&conn, "a", "mb1", &[]).expect("prune");
+        assert_eq!(pruned, 1);
+
+        let mb1 = do_load_messages(&conn, "a", "mb1", 50, 0).expect("load mb1");
+        let mb2 = do_load_messages(&conn, "a", "mb2", 50, 0).expect("load mb2");
+        assert!(mb1.is_empty());
+        assert_eq!(mb2.len(), 1);
+    }
+
+    #[test]
+    fn prune_does_not_affect_other_accounts() {
+        let conn = setup_conn();
+        do_save_folders(&conn, "a", &[sample_folder("mb1")]).expect("save folder a");
+        do_save_folders(&conn, "b", &[sample_folder("mb1")]).expect("save folder b");
+
+        do_save_messages(&conn, "a", "mb1", &[sample_message("e1", "mb1", "acct a")])
+            .expect("save a");
+        do_save_messages(&conn, "b", "mb1", &[sample_message("e1", "mb1", "acct b")])
+            .expect("save b");
+
+        // Prune account a — should not touch account b
+        let pruned = do_prune_mailbox(&conn, "a", "mb1", &[]).expect("prune");
+        assert_eq!(pruned, 1);
+
+        let a = do_load_messages(&conn, "a", "mb1", 50, 0).expect("load a");
+        let b = do_load_messages(&conn, "b", "mb1", 50, 0).expect("load b");
+        assert!(a.is_empty());
+        assert_eq!(b.len(), 1);
+    }
+
+    #[test]
+    fn prune_noop_when_all_messages_are_live() {
+        let conn = setup_conn();
+        do_save_folders(&conn, "a", &[sample_folder("mb1")]).expect("save folder");
+
+        do_save_messages(&conn, "a", "mb1", &[
+            sample_message("e1", "mb1", "msg 1"),
+            sample_message("e2", "mb1", "msg 2"),
+        ]).expect("save");
+
+        let pruned = do_prune_mailbox(&conn, "a", "mb1", &["e1".into(), "e2".into()])
+            .expect("prune");
+        assert_eq!(pruned, 0);
+
+        let after = do_load_messages(&conn, "a", "mb1", 50, 0).expect("load after");
+        assert_eq!(after.len(), 2);
     }
 }
