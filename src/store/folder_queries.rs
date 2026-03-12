@@ -150,6 +150,8 @@ pub(super) fn do_remove_account(conn: &Connection, account_id: &str) -> Result<(
         .map_err(|e| format!("Cache message cleanup error: {e}"))?;
     tx.execute("DELETE FROM folders WHERE account_id = ?1", [account_id])
         .map_err(|e| format!("Cache folder cleanup error: {e}"))?;
+    tx.execute("DELETE FROM sync_state WHERE account_id = ?1", [account_id])
+        .map_err(|e| format!("Cache sync_state cleanup error: {e}"))?;
 
     tx.commit()
         .map_err(|e| format!("Cache commit error: {e}"))?;

@@ -66,6 +66,12 @@ pub(super) enum CacheCmd {
         query: String,
         reply: oneshot::Sender<Result<Vec<MessageSummary>, String>>,
     },
+    LoadThread {
+        account_id: String,
+        thread_id: String,
+        mailbox_ids: Vec<String>,
+        reply: oneshot::Sender<Result<Vec<MessageSummary>, String>>,
+    },
     RemoveAccount {
         account_id: String,
         reply: oneshot::Sender<Result<(), String>>,

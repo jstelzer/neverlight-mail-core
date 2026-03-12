@@ -114,6 +114,25 @@ impl CacheHandle {
         rx.await.map_err(|_| "Cache unavailable".to_string())?
     }
 
+    /// Load all messages in a thread across the given mailbox IDs, sorted by timestamp ASC.
+    pub async fn load_thread(
+        &self,
+        account_id: String,
+        thread_id: String,
+        mailbox_ids: Vec<String>,
+    ) -> Result<Vec<MessageSummary>, String> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(CacheCmd::LoadThread {
+                account_id,
+                thread_id,
+                mailbox_ids,
+                reply,
+            })
+            .map_err(|_| "Cache unavailable".to_string())?;
+        rx.await.map_err(|_| "Cache unavailable".to_string())?
+    }
+
     pub async fn load_body(
         &self,
         account_id: String,
@@ -388,6 +407,19 @@ fn run_loop(conn: Connection, mut rx: mpsc::UnboundedReceiver<CacheCmd>) {
             }
             CacheCmd::Search { query, reply } => {
                 let _ = reply.send(queries::do_search(&conn, &query));
+            }
+            CacheCmd::LoadThread {
+                account_id,
+                thread_id,
+                mailbox_ids,
+                reply,
+            } => {
+                let _ = reply.send(queries::do_load_thread(
+                    &conn,
+                    &account_id,
+                    &thread_id,
+                    &mailbox_ids,
+                ));
             }
             CacheCmd::RemoveAccount { account_id, reply } => {
                 let _ = reply.send(folder_queries::do_remove_account(&conn, &account_id));

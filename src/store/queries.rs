@@ -54,86 +54,47 @@ pub(super) fn do_save_messages(
         .unchecked_transaction()
         .map_err(|e| format!("Cache tx error: {e}"))?;
 
-    // Collect email IDs that have pending ops
-    let mut pending_set = std::collections::HashSet::new();
-    {
-        let mut stmt = tx
-            .prepare(
-                "SELECT email_id FROM messages
-                 WHERE account_id = ?1 AND mailbox_id = ?2 AND pending_op IS NOT NULL",
-            )
-            .map_err(|e| format!("Cache prepare error: {e}"))?;
-        let rows = stmt
-            .query_map(rusqlite::params![account_id, mailbox_id], |row| {
-                row.get::<_, String>(0)
-            })
-            .map_err(|e| format!("Cache query error: {e}"))?;
-        for id in rows.flatten() {
-            pending_set.insert(id);
-        }
-    }
-
-    // Cascade: delete attachments for non-pending messages
-    tx.execute(
-        "DELETE FROM attachments WHERE account_id = ?1 AND email_id IN (
-            SELECT email_id FROM messages
-            WHERE account_id = ?1 AND mailbox_id = ?2 AND pending_op IS NULL
-        )",
-        rusqlite::params![account_id, mailbox_id],
-    )
-    .map_err(|e| format!("Cache attachment cascade error: {e}"))?;
-
-    // Delete non-pending messages for this mailbox
-    tx.execute(
-        "DELETE FROM messages WHERE account_id = ?1 AND mailbox_id = ?2 AND pending_op IS NULL",
-        rusqlite::params![account_id, mailbox_id],
-    )
-    .map_err(|e| format!("Cache delete error: {e}"))?;
-
-    let mut stmt = tx
+    // Upsert: insert new messages or update existing ones.
+    // Messages with a pending_op get server-side fields updated but keep their
+    // local flags and pending_op intact. All other messages get a full upsert
+    // that preserves cached body data (body_rendered, body_markdown).
+    let mut upsert_stmt = tx
         .prepare(
-            "INSERT OR IGNORE INTO messages
+            "INSERT INTO messages
              (account_id, email_id, mailbox_id, subject, sender, date, timestamp,
               is_read, is_starred, has_attachments, thread_id, flags_server, flags_local,
               message_id, in_reply_to, thread_depth, reply_to, recipient)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
-        )
-        .map_err(|e| format!("Cache prepare error: {e}"))?;
-
-    let mut update_server_stmt = tx
-        .prepare(
-            "UPDATE messages SET flags_server = ?1, subject = ?2, sender = ?3,
-             date = ?4, timestamp = ?5, has_attachments = ?6, thread_id = ?7,
-             message_id = ?8, in_reply_to = ?9, thread_depth = ?10, reply_to = ?11,
-             recipient = ?12
-             WHERE account_id = ?13 AND email_id = ?14 AND pending_op IS NOT NULL",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+             ON CONFLICT(account_id, email_id) DO UPDATE SET
+                 mailbox_id = excluded.mailbox_id,
+                 subject = excluded.subject,
+                 sender = excluded.sender,
+                 date = excluded.date,
+                 timestamp = excluded.timestamp,
+                 has_attachments = excluded.has_attachments,
+                 thread_id = excluded.thread_id,
+                 message_id = excluded.message_id,
+                 in_reply_to = excluded.in_reply_to,
+                 thread_depth = excluded.thread_depth,
+                 reply_to = excluded.reply_to,
+                 recipient = excluded.recipient,
+                 -- Only update flags when no pending op is in flight
+                 flags_server = CASE WHEN messages.pending_op IS NOT NULL
+                     THEN excluded.flags_server ELSE excluded.flags_server END,
+                 flags_local = CASE WHEN messages.pending_op IS NOT NULL
+                     THEN messages.flags_local ELSE excluded.flags_local END,
+                 is_read = CASE WHEN messages.pending_op IS NOT NULL
+                     THEN messages.is_read ELSE excluded.is_read END,
+                 is_starred = CASE WHEN messages.pending_op IS NOT NULL
+                     THEN messages.is_starred ELSE excluded.is_starred END",
         )
         .map_err(|e| format!("Cache prepare error: {e}"))?;
 
     for m in messages {
         let server_flags = flags_to_u8(m.is_read, m.is_starred);
 
-        if pending_set.contains(&m.email_id) {
-            update_server_stmt
-                .execute(rusqlite::params![
-                    server_flags as i32,
-                    m.subject,
-                    m.from,
-                    m.date,
-                    m.timestamp,
-                    m.has_attachments as i32,
-                    m.thread_id,
-                    m.message_id,
-                    m.in_reply_to,
-                    m.thread_depth,
-                    m.reply_to,
-                    m.to,
-                    account_id,
-                    m.email_id,
-                ])
-                .map_err(|e| format!("Cache update error: {e}"))?;
-        } else {
-            stmt.execute(rusqlite::params![
+        upsert_stmt
+            .execute(rusqlite::params![
                 account_id,
                 m.email_id,
                 mailbox_id,
@@ -153,11 +114,9 @@ pub(super) fn do_save_messages(
                 m.reply_to,
                 m.to,
             ])
-            .map_err(|e| format!("Cache insert error: {e}"))?;
-        }
+            .map_err(|e| format!("Cache upsert error: {e}"))?;
     }
-    drop(stmt);
-    drop(update_server_stmt);
+    drop(upsert_stmt);
 
     tx.commit()
         .map_err(|e| format!("Cache commit error: {e}"))?;
@@ -384,6 +343,57 @@ pub(super) fn do_remove_message(
     )
     .map_err(|e| format!("Cache remove_message error: {e}"))?;
     Ok(())
+}
+
+/// Load all messages in a thread across the given mailbox IDs, sorted by timestamp ASC.
+pub(super) fn do_load_thread(
+    conn: &Connection,
+    account_id: &str,
+    thread_id: &str,
+    mailbox_ids: &[String],
+) -> Result<Vec<MessageSummary>, String> {
+    if mailbox_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Build parameterized IN clause: ?3, ?4, ...
+    let placeholders: Vec<String> = (0..mailbox_ids.len())
+        .map(|i| format!("?{}", i + 3))
+        .collect();
+    let in_clause = placeholders.join(", ");
+
+    let sql = format!(
+        "SELECT email_id, subject, sender, date, timestamp,
+                is_read, is_starred, has_attachments, thread_id,
+                flags_server, flags_local, pending_op, mailbox_id,
+                message_id, in_reply_to, thread_depth, reply_to, recipient,
+                account_id
+         FROM messages
+         WHERE account_id = ?1 AND thread_id = ?2 AND mailbox_id IN ({in_clause})
+         ORDER BY timestamp ASC"
+    );
+
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| format!("Cache prepare error: {e}"))?;
+
+    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    params.push(Box::new(account_id.to_string()));
+    params.push(Box::new(thread_id.to_string()));
+    for mid in mailbox_ids {
+        params.push(Box::new(mid.clone()));
+    }
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+
+    let rows = stmt
+        .query_map(&*param_refs, row_to_summary)
+        .map_err(|e| format!("Cache query error: {e}"))?;
+
+    let mut messages = Vec::new();
+    for row in rows {
+        messages.push(row.map_err(|e| format!("Cache row error: {e}"))?);
+    }
+    Ok(messages)
 }
 
 pub(super) fn do_search(conn: &Connection, query: &str) -> Result<Vec<MessageSummary>, String> {

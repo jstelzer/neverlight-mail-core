@@ -81,6 +81,7 @@ pub(super) fn run_migrations(conn: &Connection) {
         "CREATE INDEX IF NOT EXISTS idx_messages_message_id ON messages(message_id)",
         "CREATE INDEX IF NOT EXISTS idx_folders_account ON folders(account_id)",
         "CREATE INDEX IF NOT EXISTS idx_messages_account_mailbox ON messages(account_id, mailbox_id, timestamp DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(account_id, thread_id)",
     ];
     for sql in &indexes {
         if let Err(e) = conn.execute(sql, []) {
