@@ -1,56 +1,67 @@
 # neverlight-mail-core
 
-Headless email engine for [Neverlight Mail](https://github.com/jstelzer/neverlight-mail). IMAP, SMTP, MIME rendering, credential storage, and a SQLite cache — everything a mail client needs except the UI.
+JMAP-native headless email engine for [Neverlight Mail](https://github.com/jstelzer/neverlight-mail). Implements RFC 8620 (JMAP Core) and RFC 8621 (JMAP Mail) directly — no IMAP, no SMTP, no melib.
 
-Zero GUI dependencies. Built on [melib](https://git.meli-email.org/meli/meli) (from the meli project) for IMAP and MIME, [lettre](https://crates.io/crates/lettre) for SMTP, and [rusqlite](https://crates.io/crates/rusqlite) for local caching.
+Zero GUI dependencies. Built on [reqwest](https://crates.io/crates/reqwest) for HTTP transport, [mail-parser](https://crates.io/crates/mail-parser) for RFC 5322 parsing, and [rusqlite](https://crates.io/crates/rusqlite) for local caching.
 
 ## Usage
 
 ```toml
 [dependencies]
-neverlight-mail-core = "0.0.2"
+neverlight-mail-core = "0.1.0"
 ```
 
 ## Modules
 
-| Module    | Purpose                                                                             |
-|-----------|-------------------------------------------------------------------------------------|
-| `config`  | Multi-account config resolution (env vars, config file, keyring)                    |
-| `imap`    | `ImapSession` — connect, fetch folders/messages/bodies, set flags, move, IDLE watch |
-| `smtp`    | Send email via SMTP with attachments                                                |
-| `mime`    | Render email bodies as plain text or markdown, open links                           |
-| `keyring` | OS credential storage (get/set/delete passwords)                                    |
-| `models`  | `Folder`, `MessageSummary`, `AttachmentData`                                        |
-| `store`   | SQLite cache with async facade, FTS5 search, flag tracking                          |
+| Module      | Purpose                                                          |
+|-------------|------------------------------------------------------------------|
+| `client`    | `JmapClient` — HTTP transport, request batching, blob ops       |
+| `session`   | Session discovery, capability negotiation                        |
+| `email`     | Email/query, Email/get, Email/set, Email/changes                |
+| `mailbox`   | Mailbox/get, Mailbox/changes, Mailbox/set                       |
+| `submit`    | EmailSubmission/set (sending via JMAP, replaces SMTP)            |
+| `sync`      | Delta sync loop via Email/changes + Mailbox/changes              |
+| `push`      | EventSource SSE notifications (RFC 8620 §7.3)                   |
+| `parse`     | RFC 5322 body extraction via mail-parser                         |
+| `mime`      | Body rendering (plaintext, markdown), link opening               |
+| `config`    | Multi-account config resolution (env vars, config file, keyring) |
+| `discovery` | `.well-known/jmap` probe (RFC 8620 §2.2)                        |
+| `oauth`     | OAuth 2.0 with PKCE (RFC 9728 discovery, dynamic registration)  |
+| `keyring`   | OS credential storage (app passwords + OAuth refresh tokens)     |
+| `models`    | `Folder`, `MessageSummary`, `AttachmentData`                     |
+| `setup`     | UI-agnostic account setup state machine                          |
+| `store`     | SQLite cache with async facade, FTS5 search, flag tracking       |
 
 ## Re-exports
 
-Key melib types are re-exported so consumers don't need a direct melib dependency:
+Core types are re-exported so consumers import from the crate root:
 
 ```rust
-use neverlight_mail_core::{EnvelopeHash, MailboxHash, FlagOp, Flag, BackendEvent, RefreshEventKind};
+use neverlight_mail_core::{
+    EmailId, MailboxId, ThreadId, BlobId, IdentityId,
+    Flags, FlagOp, State, MailboxRole, SyncEvent,
+};
 ```
 
 ## Example
 
 ```rust
-use neverlight_mail_core::config::Config;
-use neverlight_mail_core::imap::ImapSession;
+use neverlight_mail_core::config;
+use neverlight_mail_core::client::JmapClient;
 use neverlight_mail_core::store::CacheHandle;
 
 // Resolve accounts from env vars or config file
-let accounts = Config::resolve_all_accounts()?;
-let config = accounts[0].to_imap_config();
+let accounts = config::resolve_all_accounts()?;
+let account = &accounts[0];
 
-// Connect and fetch
-let session = ImapSession::connect(config).await?;
-let folders = session.fetch_folders().await?;
+// Connect via JMAP
+let client = JmapClient::connect(&account.jmap_url, &account.auth).await?;
 ```
 
 ## Consumers
 
 - [neverlight-mail](https://github.com/jstelzer/neverlight-mail) — COSMIC desktop email client
-- neverlight-mail-tui (planned) — ratatui terminal client
+- [neverlight-mail-tui](https://github.com/jstelzer/neverlight-mail-tui) — ratatui terminal client
 
 ## License
 

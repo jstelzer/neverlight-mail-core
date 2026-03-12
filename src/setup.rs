@@ -8,7 +8,7 @@
 
 use crate::config::{
     new_account_id, AccountCapabilities, AccountId, ConfigNeedsInput, FileAccountConfig,
-    MultiAccountFileConfig, PasswordBackend,
+    MultiAccountFileConfig, PasswordBackend, DEFAULT_JMAP_SESSION_URL,
 };
 use crate::keyring;
 
@@ -127,7 +127,7 @@ impl SetupModel {
             ConfigNeedsInput::FullSetup => Self {
                 request,
                 label: String::new(),
-                jmap_url: "https://api.fastmail.com/jmap/session".into(),
+                jmap_url: DEFAULT_JMAP_SESSION_URL.into(),
                 username: String::new(),
                 token: String::new(),
                 email: String::new(),

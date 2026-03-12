@@ -10,6 +10,10 @@ use crate::keyring;
 
 pub type AccountId = String;
 
+/// Default JMAP session URL used when no server URL is configured.
+/// Fastmail is the default provider; frontends should let users override this.
+pub const DEFAULT_JMAP_SESSION_URL: &str = "https://api.fastmail.com/jmap/session";
+
 pub fn new_account_id() -> AccountId {
     uuid::Uuid::new_v4().to_string()
 }
@@ -354,7 +358,7 @@ fn account_from_env() -> Option<AccountConfig> {
     let token = std::env::var("NEVERLIGHT_MAIL_JMAP_TOKEN").ok()?;
     let username = std::env::var("NEVERLIGHT_MAIL_USER").ok()?;
     let jmap_url = std::env::var("NEVERLIGHT_MAIL_JMAP_URL")
-        .unwrap_or_else(|_| "https://api.fastmail.com/jmap/session".into());
+        .unwrap_or_else(|_| DEFAULT_JMAP_SESSION_URL.into());
 
     Some(AccountConfig {
         id: ENV_ACCOUNT_ID.to_string(),
