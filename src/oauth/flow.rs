@@ -114,6 +114,14 @@ impl OAuthFlow {
     pub fn token_endpoint(&self) -> &str {
         &self.metadata.token_endpoint
     }
+
+    pub fn state(&self) -> &str {
+        &self.state
+    }
+
+    pub fn pkce_verifier(&self) -> &str {
+        &self.pkce_verifier
+    }
 }
 
 /// Minimal percent-encoding for URL query parameters.
