@@ -163,19 +163,29 @@ impl JmapSession {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
-        // Find primary account
+        // Find primary mail account: must have urn:ietf:params:jmap:mail in
+        // accountCapabilities. Fastmail sessions include non-mail accounts
+        // (contacts, calendar) that will reject Mailbox/get calls.
         let accounts = json
             .get("accounts")
             .and_then(|v| v.as_object())
             .ok_or("Missing accounts in session")?;
 
+        let has_mail_capability = |v: &serde_json::Value| -> bool {
+            v.get("accountCapabilities")
+                .and_then(|c| c.as_object())
+                .is_some_and(|caps| caps.contains_key("urn:ietf:params:jmap:mail"))
+        };
+
         let (account_id, _) = accounts
             .iter()
             .find(|(_, v)| {
-                v.get("isPersonal")
-                    .and_then(|p| p.as_bool())
-                    .unwrap_or(false)
+                has_mail_capability(v)
+                    && v.get("isPersonal")
+                        .and_then(|p| p.as_bool())
+                        .unwrap_or(false)
             })
+            .or_else(|| accounts.iter().find(|(_, v)| has_mail_capability(v)))
             .or_else(|| accounts.iter().next())
             .ok_or("No accounts in session")?;
 
@@ -288,6 +298,38 @@ mod tests {
         assert_eq!(session.max_objects_in_get, 1000);
         assert_eq!(session.max_calls_in_request, 64);
         assert!(session.event_source_url.is_some());
+    }
+
+    #[test]
+    fn picks_mail_capable_account_over_non_mail() {
+        let json = serde_json::json!({
+            "capabilities": {
+                "urn:ietf:params:jmap:core": {},
+                "urn:ietf:params:jmap:mail": {}
+            },
+            "accounts": {
+                "u-contacts": {
+                    "name": "contacts",
+                    "isPersonal": true,
+                    "accountCapabilities": {
+                        "urn:ietf:params:jmap:contacts": {}
+                    }
+                },
+                "u-mail": {
+                    "name": "mail",
+                    "isPersonal": true,
+                    "accountCapabilities": {
+                        "urn:ietf:params:jmap:mail": {},
+                        "urn:ietf:params:jmap:submission": {}
+                    }
+                }
+            },
+            "apiUrl": "https://api.example.com/jmap/",
+            "state": "s1"
+        });
+
+        let session = JmapSession::parse(&json).unwrap();
+        assert_eq!(session.account_id, "u-mail");
     }
 
     #[test]
