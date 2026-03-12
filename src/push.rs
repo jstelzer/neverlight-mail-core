@@ -116,10 +116,12 @@ pub async fn listen(
     let url = build_event_source_url(template, config);
     log::info!("Connecting EventSource: {}", url);
 
+    let auth = client.auth_header().await;
     let http = reqwest::Client::new();
-    let resp = http
+    let mut resp = http
         .get(&url)
         .header("Accept", "text/event-stream")
+        .header("Authorization", &auth)
         .send()
         .await
         .map_err(|e| format!("EventSource connect failed: {e}"))?;
@@ -128,28 +130,44 @@ pub async fn listen(
         return Err(format!("EventSource HTTP {}", resp.status()));
     }
 
+    log::debug!("EventSource connected, streaming events");
+
+    // Stream SSE events as they arrive (long-lived connection).
+    // reqwest::Response::chunk() reads the next chunk from the response body
+    // without buffering the entire response.
+    let mut buffer = String::new();
     let mut events_received: u32 = 0;
-    let body = resp.text().await.map_err(|e| format!("EventSource read error: {e}"))?;
 
-    // Parse SSE format: lines starting with "data:" contain the payload
-    for line in body.lines() {
-        let Some(data) = line.strip_prefix("data:") else {
-            continue;
-        };
-        let data = data.trim();
-        if data.is_empty() {
-            continue;
-        }
+    while let Some(chunk) = resp.chunk().await.map_err(|e| format!("EventSource read error: {e}"))? {
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
 
-        if let Some(change) = parse_state_change(data, &client.account_id) {
-            on_change(change);
-            events_received += 1;
-            if config.close_after > 0 && events_received >= config.close_after {
-                break;
+        // SSE events are terminated by a blank line (\n\n)
+        while let Some(pos) = buffer.find("\n\n") {
+            let event_block = buffer[..pos].to_string();
+            buffer = buffer[pos + 2..].to_string();
+
+            for line in event_block.lines() {
+                let Some(data) = line.strip_prefix("data:") else {
+                    continue;
+                };
+                let data = data.trim();
+                if data.is_empty() {
+                    continue;
+                }
+
+                if let Some(change) = parse_state_change(data, &client.account_id) {
+                    log::debug!("EventSource: state change received");
+                    on_change(change);
+                    events_received += 1;
+                    if config.close_after > 0 && events_received >= config.close_after {
+                        return Ok(());
+                    }
+                }
             }
         }
     }
 
+    log::debug!("EventSource stream ended");
     Ok(())
 }
 

@@ -279,7 +279,7 @@ impl SetupModel {
                     }
                 };
                 match multi.accounts.iter_mut().find(|a| a.id == *account_id) {
-                    Some(acct) => acct.auth_token = token_backend,
+                    Some(acct) => acct.auth = token_backend,
                     None => {
                         self.error = Some("Account not found in config".into());
                         return SetupTransition::Continue;
@@ -315,7 +315,7 @@ impl SetupModel {
                     label,
                     jmap_url,
                     username,
-                    auth_token: token_backend,
+                    auth: token_backend,
                     email_addresses,
                     capabilities: AccountCapabilities::default(),
                 };
@@ -380,7 +380,7 @@ impl SetupModel {
                 }
 
                 let token_backend = if self.token.is_empty() {
-                    existing.auth_token.clone()
+                    existing.auth.clone()
                 } else {
                     store_token(&username, &jmap_url, &self.token)
                 };
@@ -390,7 +390,7 @@ impl SetupModel {
                     label,
                     jmap_url,
                     username,
-                    auth_token: token_backend,
+                    auth: token_backend,
                     email_addresses,
                     capabilities: existing.capabilities.clone(),
                 };

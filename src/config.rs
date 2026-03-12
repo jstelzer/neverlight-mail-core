@@ -47,22 +47,42 @@ pub struct FileAccountConfig {
     /// JMAP session URL (e.g. "https://api.fastmail.com/jmap/session").
     pub jmap_url: String,
     pub username: String,
-    /// How the auth token is stored.
-    pub auth_token: PasswordBackend,
+    /// How auth credentials are stored.
+    /// Uses `auth` for new OAuth-aware format, falls back to `auth_token` for legacy.
+    #[serde(alias = "auth_token")]
+    pub auth: AuthBackend,
     #[serde(default)]
     pub email_addresses: Vec<String>,
     #[serde(default)]
     pub capabilities: AccountCapabilities,
 }
 
+/// On-disk auth credential storage. Backward-compatible: existing configs with
+/// `"backend": "keyring"` or `"backend": "plaintext"` deserialize unchanged.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "backend")]
-pub enum PasswordBackend {
+pub enum AuthBackend {
+    /// App password stored in OS keyring.
     #[serde(rename = "keyring")]
     Keyring,
+    /// App password stored as plaintext (keyring fallback).
     #[serde(rename = "plaintext")]
     Plaintext { value: String },
+    /// OAuth 2.0 credentials. Refresh token in keyring, client_id in config.
+    #[serde(rename = "oauth")]
+    OAuth {
+        issuer: String,
+        client_id: String,
+        resource: String,
+        token_endpoint: String,
+        /// Plaintext fallback for refresh token (when keyring unavailable).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        refresh_token_plaintext: Option<String>,
+    },
 }
+
+/// Legacy alias for backward compatibility in setup.rs and other call sites.
+pub type PasswordBackend = AuthBackend;
 
 // ---------------------------------------------------------------------------
 // Multi-account file config
@@ -77,6 +97,24 @@ pub struct MultiAccountFileConfig {
 // Runtime account config (resolved tokens, ready to use)
 // ---------------------------------------------------------------------------
 
+/// Runtime auth method — resolved from config + keyring at startup.
+#[derive(Debug, Clone)]
+pub enum AuthMethod {
+    /// App password or bearer token (existing behavior).
+    AppPassword { token: String },
+    /// OAuth 2.0 with PKCE.
+    OAuth {
+        issuer: String,
+        client_id: String,
+        token_endpoint: String,
+        refresh_token: String,
+        /// Cached access token (short-lived, may be expired).
+        access_token: Option<String>,
+        /// Resource URL used during authorization.
+        resource: String,
+    },
+}
+
 #[derive(Debug, Clone)]
 pub struct AccountConfig {
     pub id: AccountId,
@@ -84,21 +122,57 @@ pub struct AccountConfig {
     /// JMAP session URL.
     pub jmap_url: String,
     pub username: String,
-    /// Resolved auth token (bearer token or app password).
-    pub token: String,
+    /// Resolved auth credentials.
+    pub auth: AuthMethod,
     pub email_addresses: Vec<String>,
     pub capabilities: AccountCapabilities,
 }
 
 impl AccountConfig {
-    /// Build an AccountConfig from a FileAccountConfig + resolved token.
+    /// Convenience accessor for backward-compatible code paths.
+    /// Returns the app password token, or the current access token for OAuth.
+    pub fn token(&self) -> Option<&str> {
+        match &self.auth {
+            AuthMethod::AppPassword { token } => Some(token),
+            AuthMethod::OAuth { access_token, .. } => access_token.as_deref(),
+        }
+    }
+
+    /// Build an AccountConfig from a FileAccountConfig + resolved app-password token.
     pub fn from_file_account(fac: &FileAccountConfig, token: String) -> Self {
         AccountConfig {
             id: fac.id.clone(),
             label: fac.label.clone(),
             jmap_url: fac.jmap_url.clone(),
             username: fac.username.clone(),
-            token,
+            auth: AuthMethod::AppPassword { token },
+            email_addresses: fac.email_addresses.clone(),
+            capabilities: fac.capabilities.clone(),
+        }
+    }
+
+    /// Build an AccountConfig from a FileAccountConfig + resolved OAuth credentials.
+    pub fn from_file_account_oauth(
+        fac: &FileAccountConfig,
+        issuer: String,
+        client_id: String,
+        token_endpoint: String,
+        refresh_token: String,
+        resource: String,
+    ) -> Self {
+        AccountConfig {
+            id: fac.id.clone(),
+            label: fac.label.clone(),
+            jmap_url: fac.jmap_url.clone(),
+            username: fac.username.clone(),
+            auth: AuthMethod::OAuth {
+                issuer,
+                client_id,
+                token_endpoint,
+                refresh_token,
+                access_token: None,
+                resource,
+            },
             email_addresses: fac.email_addresses.clone(),
             capabilities: fac.capabilities.clone(),
         }
@@ -237,13 +311,13 @@ pub fn resolve_all_accounts() -> Result<Vec<AccountConfig>, ConfigNeedsInput> {
         Ok(Some(multi)) => {
             let mut accounts = Vec::new();
             for fac in &multi.accounts {
-                match resolve_token(&fac.auth_token, &fac.username, &fac.jmap_url) {
-                    Ok(token) => {
-                        accounts.push(AccountConfig::from_file_account(fac, token));
+                match resolve_account(fac) {
+                    Ok(config) => {
+                        accounts.push(config);
                     }
                     Err(e) => {
                         log::warn!(
-                            "Failed to resolve token for account '{}': {}",
+                            "Failed to resolve credentials for account '{}': {}",
                             fac.label,
                             e
                         );
@@ -287,7 +361,7 @@ fn account_from_env() -> Option<AccountConfig> {
         label: username.clone(),
         jmap_url,
         username,
-        token,
+        auth: AuthMethod::AppPassword { token },
         email_addresses: Vec::new(),
         capabilities: AccountCapabilities::default(),
     })
@@ -297,13 +371,132 @@ fn account_from_env() -> Option<AccountConfig> {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn resolve_token(
-    backend: &PasswordBackend,
+/// Resolve a FileAccountConfig into a runtime AccountConfig.
+fn resolve_account(fac: &FileAccountConfig) -> Result<AccountConfig, String> {
+    match &fac.auth {
+        AuthBackend::Plaintext { value } => {
+            Ok(AccountConfig::from_file_account(fac, value.clone()))
+        }
+        AuthBackend::Keyring => {
+            let token = keyring::get_password(&fac.username, &fac.jmap_url)?;
+            Ok(AccountConfig::from_file_account(fac, token))
+        }
+        AuthBackend::OAuth {
+            issuer,
+            client_id,
+            resource,
+            token_endpoint,
+            refresh_token_plaintext,
+        } => {
+            // Try keyring first, fall back to plaintext
+            let refresh_token = keyring::get_oauth_refresh(&fac.id)
+                .or_else(|_| {
+                    refresh_token_plaintext
+                        .clone()
+                        .ok_or_else(|| "No refresh token in keyring or config".to_string())
+                })?;
+            Ok(AccountConfig::from_file_account_oauth(
+                fac,
+                issuer.clone(),
+                client_id.clone(),
+                token_endpoint.clone(),
+                refresh_token,
+                resource.clone(),
+            ))
+        }
+    }
+}
+
+/// Resolve an app password token from an AuthBackend (legacy helper).
+pub fn resolve_token(
+    backend: &AuthBackend,
     username: &str,
     jmap_url: &str,
 ) -> Result<String, String> {
     match backend {
-        PasswordBackend::Plaintext { value } => Ok(value.clone()),
-        PasswordBackend::Keyring => keyring::get_password(username, jmap_url),
+        AuthBackend::Plaintext { value } => Ok(value.clone()),
+        AuthBackend::Keyring => keyring::get_password(username, jmap_url),
+        AuthBackend::OAuth { .. } => {
+            Err("Cannot resolve app password from OAuth backend".into())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auth_backend_keyring_roundtrips() {
+        let backend = AuthBackend::Keyring;
+        let json = serde_json::to_string(&backend).unwrap();
+        assert!(json.contains(r#""backend":"keyring""#));
+        let parsed: AuthBackend = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, AuthBackend::Keyring));
+    }
+
+    #[test]
+    fn auth_backend_plaintext_roundtrips() {
+        let backend = AuthBackend::Plaintext {
+            value: "fmu1-secret".into(),
+        };
+        let json = serde_json::to_string(&backend).unwrap();
+        let parsed: AuthBackend = serde_json::from_str(&json).unwrap();
+        match parsed {
+            AuthBackend::Plaintext { value } => assert_eq!(value, "fmu1-secret"),
+            _ => panic!("expected Plaintext"),
+        }
+    }
+
+    #[test]
+    fn auth_backend_oauth_roundtrips() {
+        let backend = AuthBackend::OAuth {
+            issuer: "https://auth.fastmail.com".into(),
+            client_id: "client-123".into(),
+            resource: "https://api.fastmail.com/jmap/session".into(),
+            token_endpoint: "https://auth.fastmail.com/token".into(),
+            refresh_token_plaintext: None,
+        };
+        let json = serde_json::to_string(&backend).unwrap();
+        assert!(json.contains(r#""backend":"oauth""#));
+        let parsed: AuthBackend = serde_json::from_str(&json).unwrap();
+        match parsed {
+            AuthBackend::OAuth {
+                issuer, client_id, ..
+            } => {
+                assert_eq!(issuer, "https://auth.fastmail.com");
+                assert_eq!(client_id, "client-123");
+            }
+            _ => panic!("expected OAuth"),
+        }
+    }
+
+    #[test]
+    fn legacy_keyring_config_deserializes() {
+        // Existing config files use "auth_token" field name — test that alias works
+        let json = r#"{
+            "id": "test-id",
+            "label": "Test",
+            "jmap_url": "https://api.fastmail.com/jmap/session",
+            "username": "test@fastmail.com",
+            "auth_token": {"backend": "keyring"},
+            "email_addresses": ["test@fastmail.com"]
+        }"#;
+        let fac: FileAccountConfig = serde_json::from_str(json).unwrap();
+        assert!(matches!(fac.auth, AuthBackend::Keyring));
+    }
+
+    #[test]
+    fn new_auth_field_deserializes() {
+        let json = r#"{
+            "id": "test-id",
+            "label": "Test",
+            "jmap_url": "https://api.fastmail.com/jmap/session",
+            "username": "test@fastmail.com",
+            "auth": {"backend": "oauth", "issuer": "https://auth.example.com", "client_id": "c1", "resource": "https://api.example.com", "token_endpoint": "https://auth.example.com/token"},
+            "email_addresses": ["test@fastmail.com"]
+        }"#;
+        let fac: FileAccountConfig = serde_json::from_str(json).unwrap();
+        assert!(matches!(fac.auth, AuthBackend::OAuth { .. }));
     }
 }

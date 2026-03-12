@@ -6,6 +6,7 @@ pub mod keyring;
 pub mod mailbox;
 pub mod mime;
 pub mod models;
+pub mod oauth;
 pub mod parse;
 pub mod push;
 pub mod session;

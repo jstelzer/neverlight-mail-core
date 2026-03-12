@@ -23,14 +23,67 @@ pub struct JmapSession {
 impl JmapSession {
     /// Connect to a JMAP server using an AccountConfig.
     ///
-    /// Auto-detects auth method from token prefix:
-    /// - `fmu1-` → Bearer token (Fastmail API token)
-    /// - otherwise → Basic auth (username:token)
+    /// For app passwords, auto-detects Bearer vs Basic from token prefix.
+    /// For OAuth, uses the access token as Bearer (caller must refresh first).
     pub async fn connect(config: &AccountConfig) -> Result<(Self, JmapClient), String> {
-        if config.token.starts_with("fmu1-") {
-            Self::connect_with_token(&config.jmap_url, &config.token).await
-        } else {
-            Self::connect_with_basic(&config.jmap_url, &config.username, &config.token).await
+        use crate::config::AuthMethod;
+        match &config.auth {
+            AuthMethod::AppPassword { token } => {
+                if token.starts_with("fmu1-") {
+                    Self::connect_with_token(&config.jmap_url, token).await
+                } else {
+                    Self::connect_with_basic(&config.jmap_url, &config.username, token).await
+                }
+            }
+            AuthMethod::OAuth {
+                access_token,
+                token_endpoint,
+                client_id,
+                refresh_token,
+                resource,
+                ..
+            } => {
+                // If we have a cached access token, try it first
+                if let Some(token) = access_token.as_deref() {
+                    match Self::connect_with_token(&config.jmap_url, token).await {
+                        Ok(result) => return Ok(result),
+                        Err(e) => {
+                            log::info!("Cached OAuth access token failed ({}), refreshing", e);
+                        }
+                    }
+                }
+
+                // Read fresh refresh token from keyring (handles ratcheting across reconnects)
+                let fresh_refresh_token = crate::keyring::get_oauth_refresh(&config.id)
+                    .unwrap_or_else(|_| refresh_token.clone());
+
+                // Refresh to get a new access token
+                log::info!("Refreshing OAuth token for account {}", config.id);
+                let token_set = crate::oauth::refresh_access_token(
+                    token_endpoint,
+                    client_id,
+                    &fresh_refresh_token,
+                    resource,
+                )
+                .await
+                .map_err(|e| format!("OAuth token refresh failed: {e}"))?;
+
+                // Persist new refresh token (servers use ratcheting — old token is invalidated)
+                if let Err(e) = crate::keyring::set_oauth_refresh(&config.id, &token_set.refresh_token) {
+                    log::warn!("Failed to persist refreshed OAuth token to keyring: {e}");
+                    // Also update plaintext fallback in config file
+                    if let Ok(Some(mut multi)) = crate::config::MultiAccountFileConfig::load() {
+                        if let Some(fac) = multi.accounts.iter_mut().find(|a| a.id == config.id) {
+                            if let crate::config::AuthBackend::OAuth { refresh_token_plaintext, .. } = &mut fac.auth {
+                                *refresh_token_plaintext = Some(token_set.refresh_token.clone());
+                            }
+                            let _ = multi.save();
+                        }
+                    }
+                }
+
+                Self::connect_with_token(&config.jmap_url, &token_set.access_token).await
+            }
         }
     }
 

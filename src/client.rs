@@ -3,6 +3,9 @@
 //! Handles batched method calls, error classification, blob upload/download.
 //! All JMAP operations go through `JmapClient`.
 
+use std::sync::Arc;
+use tokio::sync::RwLock;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -53,9 +56,13 @@ pub enum JmapError {
 }
 
 /// JMAP HTTP client. Holds session URLs and sends batched requests.
+///
+/// Auth is stored in a swappable `Arc<RwLock<String>>` and applied per-request,
+/// allowing transparent token refresh for OAuth accounts.
 #[derive(Debug, Clone)]
 pub struct JmapClient {
     http: reqwest::Client,
+    auth: Arc<RwLock<String>>,
     pub api_url: String,
     pub upload_url: String,
     pub download_url: String,
@@ -77,12 +84,11 @@ impl JmapClient {
         account_id: String,
         auth_header: String,
     ) -> Result<Self, JmapError> {
+        // Validate the auth header value is usable
+        reqwest::header::HeaderValue::from_str(&auth_header)
+            .map_err(|e| JmapError::RequestError(format!("invalid auth header: {e}")))?;
+
         let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(
-            reqwest::header::AUTHORIZATION,
-            reqwest::header::HeaderValue::from_str(&auth_header)
-                .map_err(|e| JmapError::RequestError(format!("invalid auth header: {e}")))?,
-        );
         headers.insert(
             reqwest::header::CONTENT_TYPE,
             reqwest::header::HeaderValue::from_static("application/json"),
@@ -95,12 +101,23 @@ impl JmapClient {
 
         Ok(JmapClient {
             http,
+            auth: Arc::new(RwLock::new(auth_header)),
             api_url,
             upload_url,
             download_url,
             event_source_url,
             account_id,
         })
+    }
+
+    /// Atomically swap the auth header value (e.g. after token refresh).
+    pub async fn set_auth(&self, new_auth: String) {
+        *self.auth.write().await = new_auth;
+    }
+
+    /// Read the current auth header value.
+    pub async fn auth_header(&self) -> String {
+        self.auth.read().await.clone()
     }
 
     /// Execute a batch of JMAP method calls in a single HTTP POST.
@@ -121,9 +138,11 @@ impl JmapClient {
         let max_retries = 3u32;
 
         for attempt in 0..=max_retries {
+            let auth = self.auth_header().await;
             let resp = match self
                 .http
                 .post(&self.api_url)
+                .header(reqwest::header::AUTHORIZATION, &auth)
                 .json(&request)
                 .send()
                 .await
@@ -199,9 +218,11 @@ impl JmapClient {
         let url = self.upload_url
             .replace("{accountId}", &self.account_id);
 
+        let auth = self.auth_header().await;
         let resp = self
             .http
             .post(&url)
+            .header(reqwest::header::AUTHORIZATION, &auth)
             .header("Content-Type", content_type)
             .body(data.to_vec())
             .send()
@@ -229,7 +250,10 @@ impl JmapClient {
             .replace("{name}", "download")
             .replace("{type}", "application/octet-stream");
 
-        let resp = self.http.get(&url).send().await?;
+        let auth = self.auth_header().await;
+        let resp = self.http.get(&url)
+            .header(reqwest::header::AUTHORIZATION, &auth)
+            .send().await?;
 
         if !resp.status().is_success() {
             return Err(JmapError::RequestError(format!(
