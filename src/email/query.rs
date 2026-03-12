@@ -223,12 +223,23 @@ fn parse_email_summary(item: &Value, fallback_mailbox_id: &str) -> MessageSummar
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    // mailboxIds is { "mb-id": true, ... } — pick the first, or use fallback
+    // mailboxIds is { "mb-id": true, ... }
+    // Prefer the context mailbox if it's in the map, otherwise pick the first key.
+    // This matters for delta sync: if the message moved out of the context mailbox,
+    // its mailbox_id will differ, signaling it should be removed from that view.
     let mailbox_id = item
         .get("mailboxIds")
         .and_then(|v| v.as_object())
-        .and_then(|obj| obj.keys().next())
-        .map(|s| s.to_string())
+        .map(|obj| {
+            if obj.contains_key(fallback_mailbox_id) {
+                fallback_mailbox_id.to_string()
+            } else {
+                obj.keys()
+                    .next()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| fallback_mailbox_id.to_string())
+            }
+        })
         .unwrap_or_else(|| fallback_mailbox_id.to_string());
 
     let keywords = item
@@ -529,5 +540,31 @@ mod tests {
         assert_eq!(messages[0].subject, "(no subject)");
         assert_eq!(messages[0].mailbox_id, "mb-fallback");
         assert!(!messages[0].is_read);
+    }
+
+    #[test]
+    fn mailbox_id_prefers_context_mailbox_when_present() {
+        // Message is in both inbox and sent — context mailbox should win
+        let data = serde_json::json!({
+            "list": [{
+                "id": "M100",
+                "mailboxIds": { "mb-sent": true, "mb-inbox": true }
+            }]
+        });
+        let messages = parse_email_list(&data, "mb-inbox").unwrap();
+        assert_eq!(messages[0].mailbox_id, "mb-inbox");
+    }
+
+    #[test]
+    fn mailbox_id_reflects_move_when_context_mailbox_absent() {
+        // Message moved to trash — no longer in inbox
+        let data = serde_json::json!({
+            "list": [{
+                "id": "M100",
+                "mailboxIds": { "mb-trash": true }
+            }]
+        });
+        let messages = parse_email_list(&data, "mb-inbox").unwrap();
+        assert_eq!(messages[0].mailbox_id, "mb-trash");
     }
 }
