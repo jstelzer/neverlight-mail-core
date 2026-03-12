@@ -94,6 +94,10 @@ pub struct SendRequest<'a> {
     pub html_body: Option<&'a str>,
     pub drafts_mailbox_id: &'a str,
     pub sent_mailbox_id: &'a str,
+    /// RFC 5322 Message-ID of the parent message (for replies).
+    pub in_reply_to: Option<&'a str>,
+    /// Space-separated RFC 5322 Message-ID chain (for threading).
+    pub references: Option<&'a str>,
 }
 
 /// Build the Email/set create object for a draft.
@@ -128,6 +132,15 @@ fn build_draft_create(req: &SendRequest<'_>) -> Value {
     if let Some(html) = req.html_body {
         email_create["bodyValues"]["html"] = serde_json::json!({ "value": html });
         email_create["htmlBody"] = serde_json::json!([{ "partId": "html", "type": "text/html" }]);
+    }
+
+    // Threading headers (RFC 8621 §4.1.4: inReplyTo and references are String[] arrays).
+    if let Some(irt) = req.in_reply_to {
+        email_create["inReplyTo"] = serde_json::json!([irt]);
+    }
+    if let Some(refs) = req.references {
+        let ids: Vec<&str> = refs.split_whitespace().collect();
+        email_create["references"] = serde_json::json!(ids);
     }
 
     email_create
@@ -300,6 +313,8 @@ mod tests {
             html_body: None,
             drafts_mailbox_id: "mb-drafts",
             sent_mailbox_id: "mb-sent",
+            in_reply_to: None,
+            references: None,
         }
     }
 
@@ -472,6 +487,49 @@ mod tests {
         assert_eq!(draft["subject"], "Test");
         assert_eq!(draft["from"][0]["email"], "alice@example.com");
         assert_eq!(draft["keywords"]["$draft"], true);
+    }
+
+    // -- Draft payload: threading headers --
+
+    #[test]
+    fn draft_omits_threading_headers_when_none() {
+        let to = vec!["bob@example.com".to_string()];
+        let req = SendRequest {
+            to: &to,
+            ..sample_request()
+        };
+        let draft = build_draft_create(&req);
+        assert!(draft.get("inReplyTo").is_none());
+        assert!(draft.get("references").is_none());
+    }
+
+    #[test]
+    fn draft_includes_in_reply_to() {
+        let to = vec!["bob@example.com".to_string()];
+        let req = SendRequest {
+            to: &to,
+            in_reply_to: Some("<parent@example.com>"),
+            ..sample_request()
+        };
+        let draft = build_draft_create(&req);
+        let irt = draft["inReplyTo"].as_array().unwrap();
+        assert_eq!(irt.len(), 1);
+        assert_eq!(irt[0], "<parent@example.com>");
+    }
+
+    #[test]
+    fn draft_includes_references_chain() {
+        let to = vec!["bob@example.com".to_string()];
+        let req = SendRequest {
+            to: &to,
+            references: Some("<root@example.com> <parent@example.com>"),
+            ..sample_request()
+        };
+        let draft = build_draft_create(&req);
+        let refs = draft["references"].as_array().unwrap();
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0], "<root@example.com>");
+        assert_eq!(refs[1], "<parent@example.com>");
     }
 
     // -- Identity matching --

@@ -316,6 +316,8 @@ async fn send_test_email() {
         html_body: None,
         drafts_mailbox_id: &drafts_id,
         sent_mailbox_id: &sent_id,
+        in_reply_to: None,
+        references: None,
     };
 
     let email_id = submit::send(&client, &req)
@@ -362,6 +364,8 @@ async fn send_to_external_address() {
         html_body: None,
         drafts_mailbox_id: &drafts_id,
         sent_mailbox_id: &sent_id,
+        in_reply_to: None,
+        references: None,
     };
 
     eprintln!("Sending: from={}, to={:?}", from_addr, to);
