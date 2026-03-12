@@ -76,12 +76,12 @@ impl JmapClient {
         event_source_url: Option<String>,
         account_id: String,
         auth_header: String,
-    ) -> Self {
+    ) -> Result<Self, JmapError> {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(
             reqwest::header::AUTHORIZATION,
             reqwest::header::HeaderValue::from_str(&auth_header)
-                .expect("valid auth header"),
+                .map_err(|e| JmapError::RequestError(format!("invalid auth header: {e}")))?,
         );
         headers.insert(
             reqwest::header::CONTENT_TYPE,
@@ -91,17 +91,16 @@ impl JmapClient {
         let http = reqwest::Client::builder()
             .default_headers(headers)
             .timeout(std::time::Duration::from_secs(60))
-            .build()
-            .expect("build reqwest client");
+            .build()?;
 
-        JmapClient {
+        Ok(JmapClient {
             http,
             api_url,
             upload_url,
             download_url,
             event_source_url,
             account_id,
-        }
+        })
     }
 
     /// Execute a batch of JMAP method calls in a single HTTP POST.

@@ -72,7 +72,7 @@ impl JmapSession {
             session.event_source_url.clone(),
             session.account_id.clone(),
             auth.to_string(),
-        );
+        ).map_err(|e| format!("Failed to build JMAP client: {e}"))?;
 
         Ok((session, client))
     }
