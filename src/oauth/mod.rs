@@ -16,7 +16,7 @@ mod registration;
 mod types;
 
 pub use discovery::discover_oauth_metadata;
-pub use exchange::refresh_access_token;
+pub use exchange::{exchange_code, refresh_access_token};
 pub use flow::OAuthFlow;
 pub use pkce::{generate_code_verifier, pkce_challenge_s256};
 pub use redirect::{LocalServerRedirect, OAuthRedirectHandler};
