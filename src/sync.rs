@@ -234,11 +234,37 @@ async fn sync_emails_delta(
         for m in &mut summaries {
             m.account_id = account_id.to_string();
         }
-        let _ = cache.save_messages(
-            account_id.to_string(),
-            mailbox_id.to_string(),
-            summaries,
-        ).await;
+
+        // Partition: messages still in this mailbox vs. moved elsewhere.
+        // Email/changes is account-global, so updated messages may have moved
+        // to a different mailbox (e.g., trash). The server's mailboxIds tells
+        // us where the message actually lives now.
+        let mut still_here = Vec::new();
+        let mut moved_away = Vec::new();
+        for m in summaries {
+            if m.mailbox_id == mailbox_id {
+                still_here.push(m);
+            } else {
+                moved_away.push(m);
+            }
+        }
+
+        if !still_here.is_empty() {
+            let _ = cache.save_messages(
+                account_id.to_string(),
+                mailbox_id.to_string(),
+                still_here,
+            ).await;
+        }
+
+        // Remove messages that moved out of this mailbox
+        for m in &moved_away {
+            log::debug!(
+                "Delta sync: email {} moved from {} to {} — removing from cache",
+                m.email_id, mailbox_id, m.mailbox_id,
+            );
+            let _ = cache.remove_message(account_id.to_string(), m.email_id.clone()).await;
+        }
     }
 
     // Update state
