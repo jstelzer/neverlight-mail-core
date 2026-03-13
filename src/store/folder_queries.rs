@@ -46,6 +46,11 @@ pub(super) fn do_save_folders(
     let server_ids: Vec<&str> = folders.iter().map(|f| f.mailbox_id.as_str()).collect();
     if server_ids.is_empty() {
         tx.execute(
+            "DELETE FROM message_mailboxes WHERE account_id = ?1",
+            [account_id],
+        )
+        .map_err(|e| format!("Cache junction cascade error: {e}"))?;
+        tx.execute(
             "DELETE FROM attachments WHERE account_id = ?1 AND email_id IN (
                 SELECT email_id FROM messages WHERE account_id = ?1
             )",
@@ -70,19 +75,28 @@ pub(super) fn do_save_folders(
         let param_refs: Vec<&dyn rusqlite::types::ToSql> =
             params.iter().map(|p| p.as_ref()).collect();
 
+        // Remove junction rows for stale mailboxes
         let sql = format!(
-            "DELETE FROM attachments WHERE account_id = ?1 AND email_id IN (
-                SELECT email_id FROM messages WHERE account_id = ?1 AND mailbox_id NOT IN ({placeholders})
-            )"
+            "DELETE FROM message_mailboxes WHERE account_id = ?1 AND mailbox_id NOT IN ({placeholders})"
         );
         tx.execute(&sql, param_refs.as_slice())
-            .map_err(|e| format!("Cache cascade error: {e}"))?;
+            .map_err(|e| format!("Cache junction cascade error: {e}"))?;
 
-        let sql = format!(
-            "DELETE FROM messages WHERE account_id = ?1 AND mailbox_id NOT IN ({placeholders})"
-        );
-        tx.execute(&sql, param_refs.as_slice())
-            .map_err(|e| format!("Cache cascade error: {e}"))?;
+        // Remove orphaned messages (no remaining mailbox associations)
+        tx.execute(
+            "DELETE FROM attachments WHERE account_id = ?1 AND email_id NOT IN (
+                SELECT email_id FROM message_mailboxes WHERE account_id = ?1
+            )",
+            [account_id],
+        )
+        .map_err(|e| format!("Cache cascade error: {e}"))?;
+        tx.execute(
+            "DELETE FROM messages WHERE account_id = ?1 AND email_id NOT IN (
+                SELECT email_id FROM message_mailboxes WHERE account_id = ?1
+            )",
+            [account_id],
+        )
+        .map_err(|e| format!("Cache cascade error: {e}"))?;
 
         let sql = format!(
             "DELETE FROM folders WHERE account_id = ?1 AND mailbox_id NOT IN ({placeholders})"
@@ -90,6 +104,117 @@ pub(super) fn do_save_folders(
         tx.execute(&sql, param_refs.as_slice())
             .map_err(|e| format!("Cache delete error: {e}"))?;
     }
+
+    tx.commit()
+        .map_err(|e| format!("Cache commit error: {e}"))?;
+    Ok(())
+}
+
+/// Upsert folders without pruning absent ones.
+///
+/// Unlike `do_save_folders`, this inserts/updates the given folders but does
+/// NOT delete folders missing from the list. Used by delta sync to apply
+/// created/updated mailboxes without affecting the rest.
+pub(super) fn do_upsert_folders(
+    conn: &Connection,
+    account_id: &str,
+    folders: &[Folder],
+) -> Result<(), String> {
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| format!("Cache tx error: {e}"))?;
+
+    let mut stmt = tx
+        .prepare(
+            "INSERT INTO folders (account_id, path, name, mailbox_id, role, sort_order, unread_count, total_count)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(account_id, path) DO UPDATE SET
+                 name = excluded.name,
+                 mailbox_id = excluded.mailbox_id,
+                 role = excluded.role,
+                 sort_order = excluded.sort_order,
+                 unread_count = excluded.unread_count,
+                 total_count = excluded.total_count",
+        )
+        .map_err(|e| format!("Cache prepare error: {e}"))?;
+
+    for f in folders {
+        stmt.execute(rusqlite::params![
+            account_id,
+            f.path,
+            f.name,
+            f.mailbox_id,
+            f.role,
+            f.sort_order,
+            f.unread_count,
+            f.total_count,
+        ])
+        .map_err(|e| format!("Cache upsert error: {e}"))?;
+    }
+    drop(stmt);
+
+    tx.commit()
+        .map_err(|e| format!("Cache commit error: {e}"))?;
+    Ok(())
+}
+
+/// Remove specific folders by mailbox ID, cascading to their messages and attachments.
+pub(super) fn do_remove_folders_by_id(
+    conn: &Connection,
+    account_id: &str,
+    mailbox_ids: &[String],
+) -> Result<(), String> {
+    if mailbox_ids.is_empty() {
+        return Ok(());
+    }
+
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| format!("Cache tx error: {e}"))?;
+
+    let placeholders: String = (0..mailbox_ids.len())
+        .map(|i| format!("?{}", i + 2))
+        .collect::<Vec<_>>()
+        .join(",");
+
+    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    params.push(Box::new(account_id.to_string()));
+    for id in mailbox_ids {
+        params.push(Box::new(id.clone()));
+    }
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+        params.iter().map(|p| p.as_ref()).collect();
+
+    // Cascade: junction rows → orphaned messages/attachments → folders
+
+    // Remove junction rows for these mailboxes
+    let sql = format!(
+        "DELETE FROM message_mailboxes WHERE account_id = ?1 AND mailbox_id IN ({placeholders})"
+    );
+    tx.execute(&sql, param_refs.as_slice())
+        .map_err(|e| format!("Cache junction cascade error: {e}"))?;
+
+    // Remove orphaned messages (no remaining mailbox associations)
+    tx.execute(
+        "DELETE FROM attachments WHERE account_id = ?1 AND email_id NOT IN (
+            SELECT email_id FROM message_mailboxes WHERE account_id = ?1
+        )",
+        [account_id],
+    )
+    .map_err(|e| format!("Cache cascade error: {e}"))?;
+    tx.execute(
+        "DELETE FROM messages WHERE account_id = ?1 AND email_id NOT IN (
+            SELECT email_id FROM message_mailboxes WHERE account_id = ?1
+        )",
+        [account_id],
+    )
+    .map_err(|e| format!("Cache cascade error: {e}"))?;
+
+    let sql = format!(
+        "DELETE FROM folders WHERE account_id = ?1 AND mailbox_id IN ({placeholders})"
+    );
+    tx.execute(&sql, param_refs.as_slice())
+        .map_err(|e| format!("Cache delete error: {e}"))?;
 
     tx.commit()
         .map_err(|e| format!("Cache commit error: {e}"))?;
@@ -144,6 +269,8 @@ pub(super) fn do_remove_account(conn: &Connection, account_id: &str) -> Result<(
         .unchecked_transaction()
         .map_err(|e| format!("Cache tx error: {e}"))?;
 
+    tx.execute("DELETE FROM message_mailboxes WHERE account_id = ?1", [account_id])
+        .map_err(|e| format!("Cache junction cleanup error: {e}"))?;
     tx.execute("DELETE FROM attachments WHERE account_id = ?1", [account_id])
         .map_err(|e| format!("Cache attachment cleanup error: {e}"))?;
     tx.execute("DELETE FROM messages WHERE account_id = ?1", [account_id])
@@ -152,6 +279,8 @@ pub(super) fn do_remove_account(conn: &Connection, account_id: &str) -> Result<(
         .map_err(|e| format!("Cache folder cleanup error: {e}"))?;
     tx.execute("DELETE FROM sync_state WHERE account_id = ?1", [account_id])
         .map_err(|e| format!("Cache sync_state cleanup error: {e}"))?;
+    tx.execute("DELETE FROM backfill_progress WHERE account_id = ?1", [account_id])
+        .map_err(|e| format!("Cache backfill_progress cleanup error: {e}"))?;
 
     tx.commit()
         .map_err(|e| format!("Cache commit error: {e}"))?;
@@ -322,5 +451,109 @@ mod tests {
         // Same sort_order: alphabetical by path
         assert_eq!(names[2], "Alpha");
         assert_eq!(names[3], "Zeta");
+    }
+
+    fn sample_folder_named(mailbox_id: &str, name: &str) -> Folder {
+        Folder {
+            name: name.into(),
+            path: name.into(),
+            unread_count: 0,
+            total_count: 0,
+            mailbox_id: mailbox_id.to_string(),
+            role: None,
+            sort_order: 0,
+        }
+    }
+
+    #[test]
+    fn upsert_folders_does_not_delete_unmentioned() {
+        let conn = setup_conn();
+
+        // Save folder A via full save
+        do_save_folders(&conn, "a", &[sample_folder_named("mb1", "Alpha")])
+            .expect("save A");
+
+        // Upsert folder B — A should survive
+        do_upsert_folders(&conn, "a", &[sample_folder_named("mb2", "Beta")])
+            .expect("upsert B");
+
+        let folders = do_load_folders(&conn, "a").expect("load");
+        assert_eq!(folders.len(), 2);
+        let names: Vec<&str> = folders.iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&"Alpha"));
+        assert!(names.contains(&"Beta"));
+    }
+
+    #[test]
+    fn remove_folders_by_id_cascades() {
+        let conn = setup_conn();
+        use crate::models::MessageSummary;
+        use crate::store::queries::{do_save_messages, do_load_messages, do_save_body, do_load_body};
+        use crate::models::AttachmentData;
+
+        do_save_folders(&conn, "a", &[
+            sample_folder_named("mb1", "INBOX"),
+            sample_folder_named("mb2", "Trash"),
+        ]).expect("save folders");
+
+        let msg = MessageSummary {
+            account_id: String::new(),
+            email_id: "e1".into(),
+            subject: "trash msg".into(),
+            from: "from@example.com".into(),
+            to: "to@example.com".into(),
+            date: "2026-01-01".into(),
+            is_read: false,
+            is_starred: false,
+            has_attachments: false,
+            thread_id: None,
+            mailbox_ids: vec!["mb2".into()],
+            context_mailbox_id: "mb2".into(),
+            timestamp: 100,
+            message_id: "<e1@example.com>".into(),
+            in_reply_to: None,
+            reply_to: None,
+            thread_depth: 0,
+        };
+        do_save_messages(&conn, "a", "mb2", &[msg]).expect("save msg");
+        do_save_body(&conn, "a", "e1", "# body", "body", &[AttachmentData {
+            filename: "file.txt".into(),
+            mime_type: "text/plain".into(),
+            data: b"data".to_vec(),
+        }]).expect("save body");
+
+        // Remove mb2 specifically
+        do_remove_folders_by_id(&conn, "a", &["mb2".to_string()]).expect("remove mb2");
+
+        // mb2's messages and body should be gone
+        let msgs = do_load_messages(&conn, "a", "mb2", 50, 0).expect("load mb2");
+        assert!(msgs.is_empty());
+        let body = do_load_body(&conn, "a", "e1").expect("load body");
+        assert!(body.is_none());
+
+        // mb1 folder should still exist
+        let folders = do_load_folders(&conn, "a").expect("load folders");
+        assert_eq!(folders.len(), 1);
+        assert_eq!(folders[0].mailbox_id, "mb1");
+    }
+
+    #[test]
+    fn remove_folders_by_id_does_not_affect_others() {
+        let conn = setup_conn();
+
+        do_save_folders(&conn, "a", &[
+            sample_folder_named("mb1", "INBOX"),
+            sample_folder_named("mb2", "Sent"),
+            sample_folder_named("mb3", "Trash"),
+        ]).expect("save folders");
+
+        do_remove_folders_by_id(&conn, "a", &["mb2".to_string()]).expect("remove mb2");
+
+        let folders = do_load_folders(&conn, "a").expect("load");
+        assert_eq!(folders.len(), 2);
+        let ids: Vec<&str> = folders.iter().map(|f| f.mailbox_id.as_str()).collect();
+        assert!(ids.contains(&"mb1"));
+        assert!(ids.contains(&"mb3"));
+        assert!(!ids.contains(&"mb2"));
     }
 }

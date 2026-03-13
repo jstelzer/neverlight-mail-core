@@ -434,7 +434,7 @@ async fn sync_mailboxes_full_then_delta() {
 }
 
 #[tokio::test]
-async fn sync_emails_full_then_delta() {
+async fn sync_emails_head_then_delta() {
     skip_if_no_env!();
     let (_session, client) = connect_client().await;
     let cache = test_cache();

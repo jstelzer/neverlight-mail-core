@@ -59,6 +59,9 @@ pub struct FileAccountConfig {
     pub email_addresses: Vec<String>,
     #[serde(default)]
     pub capabilities: AccountCapabilities,
+    /// Maximum messages to backfill per mailbox. None = unlimited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_messages_per_mailbox: Option<u32>,
 }
 
 /// On-disk auth credential storage. Backward-compatible: existing configs with
@@ -130,6 +133,8 @@ pub struct AccountConfig {
     pub auth: AuthMethod,
     pub email_addresses: Vec<String>,
     pub capabilities: AccountCapabilities,
+    /// Maximum messages to backfill per mailbox. None = unlimited.
+    pub max_messages_per_mailbox: Option<u32>,
 }
 
 impl AccountConfig {
@@ -152,6 +157,7 @@ impl AccountConfig {
             auth: AuthMethod::AppPassword { token },
             email_addresses: fac.email_addresses.clone(),
             capabilities: fac.capabilities.clone(),
+            max_messages_per_mailbox: fac.max_messages_per_mailbox,
         }
     }
 
@@ -179,6 +185,7 @@ impl AccountConfig {
             },
             email_addresses: fac.email_addresses.clone(),
             capabilities: fac.capabilities.clone(),
+            max_messages_per_mailbox: fac.max_messages_per_mailbox,
         }
     }
 }
@@ -368,6 +375,7 @@ fn account_from_env() -> Option<AccountConfig> {
         auth: AuthMethod::AppPassword { token },
         email_addresses: Vec::new(),
         capabilities: AccountCapabilities::default(),
+        max_messages_per_mailbox: None,
     })
 }
 
@@ -502,5 +510,40 @@ mod tests {
         }"#;
         let fac: FileAccountConfig = serde_json::from_str(json).unwrap();
         assert!(matches!(fac.auth, AuthBackend::OAuth { .. }));
+    }
+
+    #[test]
+    fn config_round_trips_max_messages() {
+        // With the field set
+        let json = r#"{
+            "id": "test-id",
+            "label": "Test",
+            "jmap_url": "https://api.fastmail.com/jmap/session",
+            "username": "test@fastmail.com",
+            "auth": {"backend": "keyring"},
+            "email_addresses": [],
+            "max_messages_per_mailbox": 5000
+        }"#;
+        let fac: FileAccountConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(fac.max_messages_per_mailbox, Some(5000));
+
+        let serialized = serde_json::to_string(&fac).unwrap();
+        let reparsed: FileAccountConfig = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(reparsed.max_messages_per_mailbox, Some(5000));
+
+        // Without the field (defaults to None, omitted on serialization)
+        let json_no_field = r#"{
+            "id": "test-id",
+            "label": "Test",
+            "jmap_url": "https://api.fastmail.com/jmap/session",
+            "username": "test@fastmail.com",
+            "auth": {"backend": "keyring"},
+            "email_addresses": []
+        }"#;
+        let fac2: FileAccountConfig = serde_json::from_str(json_no_field).unwrap();
+        assert_eq!(fac2.max_messages_per_mailbox, None);
+
+        let serialized2 = serde_json::to_string(&fac2).unwrap();
+        assert!(!serialized2.contains("max_messages_per_mailbox"));
     }
 }

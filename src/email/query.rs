@@ -223,24 +223,24 @@ fn parse_email_summary(item: &Value, fallback_mailbox_id: &str) -> MessageSummar
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    // mailboxIds is { "mb-id": true, ... }
-    // Prefer the context mailbox if it's in the map, otherwise pick the first key.
-    // This matters for delta sync: if the message moved out of the context mailbox,
-    // its mailbox_id will differ, signaling it should be removed from that view.
-    let mailbox_id = item
+    // mailboxIds is { "mb-id": true, ... } — extract ALL keys
+    let mailbox_ids: Vec<String> = item
         .get("mailboxIds")
         .and_then(|v| v.as_object())
-        .map(|obj| {
-            if obj.contains_key(fallback_mailbox_id) {
-                fallback_mailbox_id.to_string()
-            } else {
-                obj.keys()
-                    .next()
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| fallback_mailbox_id.to_string())
-            }
-        })
-        .unwrap_or_else(|| fallback_mailbox_id.to_string());
+        .map(|obj| obj.keys().cloned().collect())
+        .unwrap_or_default();
+
+    // context_mailbox_id: prefer the fallback (the mailbox the UI is viewing),
+    // otherwise pick the first key. If the message moved out of the context
+    // mailbox, context_mailbox_id will differ, signaling delta sync to act.
+    let context_mailbox_id = if mailbox_ids.contains(&fallback_mailbox_id.to_string()) {
+        fallback_mailbox_id.to_string()
+    } else {
+        mailbox_ids
+            .first()
+            .cloned()
+            .unwrap_or_else(|| fallback_mailbox_id.to_string())
+    };
 
     let keywords = item
         .get("keywords")
@@ -310,7 +310,8 @@ fn parse_email_summary(item: &Value, fallback_mailbox_id: &str) -> MessageSummar
         is_starred: flags.flagged,
         has_attachments: has_attachment,
         thread_id,
-        mailbox_id,
+        mailbox_ids,
+        context_mailbox_id,
         message_id,
         in_reply_to,
         reply_to: None,
@@ -465,7 +466,7 @@ mod tests {
         assert!(m1.is_read);
         assert!(m1.is_starred);
         assert!(!m1.has_attachments);
-        assert_eq!(m1.mailbox_id, "mb-inbox");
+        assert_eq!(m1.context_mailbox_id, "mb-inbox");
         assert_eq!(m1.message_id, "msg001@example.com");
         assert!(m1.in_reply_to.is_none());
 
@@ -538,7 +539,7 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].email_id, "M999");
         assert_eq!(messages[0].subject, "(no subject)");
-        assert_eq!(messages[0].mailbox_id, "mb-fallback");
+        assert_eq!(messages[0].context_mailbox_id, "mb-fallback");
         assert!(!messages[0].is_read);
     }
 
@@ -552,7 +553,7 @@ mod tests {
             }]
         });
         let messages = parse_email_list(&data, "mb-inbox").unwrap();
-        assert_eq!(messages[0].mailbox_id, "mb-inbox");
+        assert_eq!(messages[0].context_mailbox_id, "mb-inbox");
     }
 
     #[test]
@@ -565,6 +566,6 @@ mod tests {
             }]
         });
         let messages = parse_email_list(&data, "mb-inbox").unwrap();
-        assert_eq!(messages[0].mailbox_id, "mb-trash");
+        assert_eq!(messages[0].context_mailbox_id, "mb-trash");
     }
 }

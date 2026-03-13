@@ -1,6 +1,6 @@
 use tokio::sync::oneshot;
 
-use crate::models::{AttachmentData, Folder, MessageSummary};
+use crate::models::{AttachmentData, BackfillProgress, Folder, MessageSummary};
 
 #[allow(clippy::type_complexity)]
 pub(super) enum CacheCmd {
@@ -69,6 +69,7 @@ pub(super) enum CacheCmd {
         reply: oneshot::Sender<Result<u64, String>>,
     },
     Search {
+        account_id: String,
         query: String,
         reply: oneshot::Sender<Result<Vec<MessageSummary>, String>>,
     },
@@ -77,6 +78,16 @@ pub(super) enum CacheCmd {
         thread_id: String,
         mailbox_ids: Vec<String>,
         reply: oneshot::Sender<Result<Vec<MessageSummary>, String>>,
+    },
+    UpsertFolders {
+        account_id: String,
+        folders: Vec<Folder>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    RemoveFolders {
+        account_id: String,
+        mailbox_ids: Vec<String>,
+        reply: oneshot::Sender<Result<(), String>>,
     },
     RemoveAccount {
         account_id: String,
@@ -91,6 +102,28 @@ pub(super) enum CacheCmd {
         account_id: String,
         resource: String,
         state: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    GetBackfillProgress {
+        account_id: String,
+        mailbox_id: String,
+        reply: oneshot::Sender<Result<Option<BackfillProgress>, String>>,
+    },
+    SetBackfillProgress {
+        account_id: String,
+        mailbox_id: String,
+        position: u32,
+        total: u32,
+        completed: bool,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    ListBackfillProgress {
+        account_id: String,
+        reply: oneshot::Sender<Result<Vec<BackfillProgress>, String>>,
+    },
+    ResetBackfillProgress {
+        account_id: String,
+        mailbox_id: String,
         reply: oneshot::Sender<Result<(), String>>,
     },
 }

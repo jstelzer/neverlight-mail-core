@@ -175,6 +175,38 @@ struct RawMailbox {
     unread_emails: u32,
 }
 
+/// Fetch specific mailboxes by ID.
+///
+/// Sends `Mailbox/get` with an explicit `ids` list. Used by delta sync to
+/// fetch only created/updated mailboxes instead of the full set.
+pub async fn fetch_by_ids(client: &JmapClient, ids: &[String]) -> Result<Vec<Folder>, JmapError> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let call = client.method(
+        "Mailbox/get",
+        serde_json::json!({
+            "ids": ids,
+            "properties": MAILBOX_PROPERTIES,
+        }),
+        "mfetch0",
+    );
+
+    let resp = client.call(vec![call]).await?;
+    let list = resp
+        .method_responses
+        .iter()
+        .find(|mc| mc.2 == "mfetch0")
+        .and_then(|mc| mc.1.get("list"))
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| {
+            JmapError::RequestError("Missing list in Mailbox/get response".into())
+        })?;
+
+    parse_mailboxes_from_list(list)
+}
+
 /// Find the mailbox ID for a given role (e.g. "inbox", "drafts", "trash").
 pub fn find_by_role(folders: &[Folder], role: &str) -> Option<String> {
     folders

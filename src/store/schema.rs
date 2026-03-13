@@ -131,6 +131,17 @@ pub(super) fn run_migrations(conn: &Connection) {
     // Invalidate cached rendered bodies so they re-render through the updated
     // html-safe-md pipeline. Only runs once: skips if bodies are already NULL.
     migrate_invalidate_body_cache(conn);
+
+    // Migrate Email state from per-mailbox to account-global.
+    // Old keys like "Email:mb1" are stale — delete them so the next sync
+    // falls through to a full resync with the correct "Email" key.
+    migrate_email_state_to_global(conn);
+
+    // Multi-mailbox junction table: a message can be in multiple mailboxes.
+    migrate_message_mailboxes(conn);
+
+    // Backfill progress tracking for background history walking.
+    migrate_backfill_progress(conn);
 }
 
 /// One-shot migration: NULL out cached body columns to force re-rendering.
@@ -173,6 +184,88 @@ fn migrate_invalidate_body_cache(conn: &Connection) {
          INSERT INTO _body_cache_v2 VALUES (1);"
     ) {
         log::warn!("Body cache invalidation failed: {}", e);
+    }
+}
+
+/// One-shot migration: delete per-mailbox Email state keys.
+///
+/// Email/changes is account-global (RFC 8620 §5.2), but we previously stored
+/// state tokens as "Email:{mailbox_id}". This caused redundant syncs and
+/// messages "disappearing" from folder views. Delete the stale keys so the
+/// next sync falls through to a full resync with the correct "Email" key.
+fn migrate_email_state_to_global(conn: &Connection) {
+    let already_done: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='_email_state_v2')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+
+    if already_done {
+        return;
+    }
+
+    log::info!("Migrating Email state from per-mailbox to account-global");
+    if let Err(e) = conn.execute_batch(
+        "DELETE FROM sync_state WHERE resource LIKE 'Email:%';
+         CREATE TABLE IF NOT EXISTS _email_state_v2 (migrated INTEGER DEFAULT 1);
+         INSERT INTO _email_state_v2 VALUES (1);"
+    ) {
+        log::warn!("Email state migration failed: {}", e);
+    }
+}
+
+/// One-shot migration: create the `message_mailboxes` junction table and backfill
+/// from the existing `messages.mailbox_id` column.
+///
+/// JMAP `mailboxIds` is `Record<Id, Boolean>` — a message can be in multiple
+/// mailboxes. The junction table stores the full truth. The old `mailbox_id`
+/// column is kept (nullable) but no longer authoritative.
+fn migrate_message_mailboxes(conn: &Connection) {
+    let already_done: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_mailboxes')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+
+    if already_done {
+        return;
+    }
+
+    log::info!("Creating message_mailboxes junction table and backfilling");
+    if let Err(e) = conn.execute_batch(
+        "CREATE TABLE message_mailboxes (
+            account_id TEXT NOT NULL,
+            email_id TEXT NOT NULL,
+            mailbox_id TEXT NOT NULL,
+            PRIMARY KEY (account_id, email_id, mailbox_id),
+            FOREIGN KEY (account_id, email_id) REFERENCES messages(account_id, email_id) ON DELETE CASCADE
+        );
+        CREATE INDEX idx_msg_mbox_lookup ON message_mailboxes(account_id, mailbox_id);
+        INSERT OR IGNORE INTO message_mailboxes (account_id, email_id, mailbox_id)
+            SELECT account_id, email_id, mailbox_id FROM messages WHERE mailbox_id IS NOT NULL;"
+    ) {
+        log::warn!("message_mailboxes migration failed: {}", e);
+    }
+}
+
+/// Create backfill_progress table for tracking per-mailbox background history walking.
+fn migrate_backfill_progress(conn: &Connection) {
+    if let Err(e) = conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS backfill_progress (
+            account_id TEXT NOT NULL,
+            mailbox_id TEXT NOT NULL,
+            position   INTEGER NOT NULL DEFAULT 0,
+            total      INTEGER NOT NULL DEFAULT 0,
+            completed  INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+            PRIMARY KEY (account_id, mailbox_id)
+        )"
+    ) {
+        log::warn!("backfill_progress migration failed: {}", e);
     }
 }
 
@@ -227,5 +320,57 @@ mod tests {
             )
             .expect("query fts");
         assert_eq!(hits, 1);
+    }
+
+    #[test]
+    fn email_state_migration_cleans_stale_keys() {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch(SCHEMA).expect("create schema");
+        // Run migrations except the email state one — manually set up stale keys
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS sync_state (
+                account_id TEXT NOT NULL,
+                resource TEXT NOT NULL,
+                state TEXT NOT NULL,
+                PRIMARY KEY (account_id, resource)
+            )"
+        ).expect("create sync_state");
+
+        // Insert stale per-mailbox keys and a valid Mailbox key
+        conn.execute(
+            "INSERT INTO sync_state VALUES ('a', 'Email:mb1', 's1')",
+            [],
+        ).expect("insert Email:mb1");
+        conn.execute(
+            "INSERT INTO sync_state VALUES ('a', 'Email:mb2', 's2')",
+            [],
+        ).expect("insert Email:mb2");
+        conn.execute(
+            "INSERT INTO sync_state VALUES ('a', 'Mailbox', 's3')",
+            [],
+        ).expect("insert Mailbox");
+
+        // Run the migration
+        super::migrate_email_state_to_global(&conn);
+
+        // Stale Email:* keys should be gone
+        let email_keys: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sync_state WHERE resource LIKE 'Email:%'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count email keys");
+        assert_eq!(email_keys, 0, "stale Email:* keys should be deleted");
+
+        // Mailbox key should survive
+        let mailbox_state: String = conn
+            .query_row(
+                "SELECT state FROM sync_state WHERE resource = 'Mailbox'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("mailbox state");
+        assert_eq!(mailbox_state, "s3");
     }
 }

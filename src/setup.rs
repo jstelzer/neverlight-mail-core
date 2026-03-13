@@ -318,6 +318,7 @@ impl SetupModel {
                     auth: token_backend,
                     email_addresses,
                     capabilities: AccountCapabilities::default(),
+                    max_messages_per_mailbox: None,
                 };
 
                 let mut multi = MultiAccountFileConfig::load().ok().flatten().unwrap_or(
@@ -393,6 +394,7 @@ impl SetupModel {
                     auth: token_backend,
                     email_addresses,
                     capabilities: existing.capabilities.clone(),
+                    max_messages_per_mailbox: existing.max_messages_per_mailbox,
                 };
 
                 if let Some(pos) = multi.accounts.iter().position(|a| a.id == *account_id) {

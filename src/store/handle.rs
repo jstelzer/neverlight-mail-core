@@ -7,7 +7,7 @@ use super::commands::CacheCmd;
 use super::folder_queries;
 use super::queries;
 use super::schema::{run_migrations, SCHEMA};
-use crate::models::{AttachmentData, Folder, MessageSummary};
+use crate::models::{AttachmentData, BackfillProgress, Folder, MessageSummary};
 
 // ---------------------------------------------------------------------------
 // CacheHandle — Clone + Send + Sync async facade
@@ -264,6 +264,40 @@ impl CacheHandle {
         rx.await.map_err(|_| "Cache unavailable".to_string())?
     }
 
+    /// Upsert folders without pruning absent ones (delta sync).
+    pub async fn upsert_folders(
+        &self,
+        account_id: String,
+        folders: Vec<Folder>,
+    ) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(CacheCmd::UpsertFolders {
+                account_id,
+                folders,
+                reply,
+            })
+            .map_err(|_| "Cache unavailable".to_string())?;
+        rx.await.map_err(|_| "Cache unavailable".to_string())?
+    }
+
+    /// Remove specific folders by mailbox ID, cascading to messages and attachments.
+    pub async fn remove_folders(
+        &self,
+        account_id: String,
+        mailbox_ids: Vec<String>,
+    ) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(CacheCmd::RemoveFolders {
+                account_id,
+                mailbox_ids,
+                reply,
+            })
+            .map_err(|_| "Cache unavailable".to_string())?;
+        rx.await.map_err(|_| "Cache unavailable".to_string())?
+    }
+
     pub async fn remove_account(&self, account_id: String) -> Result<(), String> {
         let (reply, rx) = oneshot::channel();
         self.tx
@@ -306,10 +340,86 @@ impl CacheHandle {
         rx.await.map_err(|_| "Cache unavailable".to_string())?
     }
 
-    pub async fn search(&self, query: String) -> Result<Vec<MessageSummary>, String> {
+    pub async fn get_backfill_progress(
+        &self,
+        account_id: String,
+        mailbox_id: String,
+    ) -> Result<Option<BackfillProgress>, String> {
         let (reply, rx) = oneshot::channel();
         self.tx
-            .send(CacheCmd::Search { query, reply })
+            .send(CacheCmd::GetBackfillProgress {
+                account_id,
+                mailbox_id,
+                reply,
+            })
+            .map_err(|_| "Cache unavailable".to_string())?;
+        rx.await.map_err(|_| "Cache unavailable".to_string())?
+    }
+
+    pub async fn set_backfill_progress(
+        &self,
+        account_id: String,
+        mailbox_id: String,
+        position: u32,
+        total: u32,
+        completed: bool,
+    ) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(CacheCmd::SetBackfillProgress {
+                account_id,
+                mailbox_id,
+                position,
+                total,
+                completed,
+                reply,
+            })
+            .map_err(|_| "Cache unavailable".to_string())?;
+        rx.await.map_err(|_| "Cache unavailable".to_string())?
+    }
+
+    pub async fn list_backfill_progress(
+        &self,
+        account_id: String,
+    ) -> Result<Vec<BackfillProgress>, String> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(CacheCmd::ListBackfillProgress {
+                account_id,
+                reply,
+            })
+            .map_err(|_| "Cache unavailable".to_string())?;
+        rx.await.map_err(|_| "Cache unavailable".to_string())?
+    }
+
+    pub async fn reset_backfill_progress(
+        &self,
+        account_id: String,
+        mailbox_id: String,
+    ) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(CacheCmd::ResetBackfillProgress {
+                account_id,
+                mailbox_id,
+                reply,
+            })
+            .map_err(|_| "Cache unavailable".to_string())?;
+        rx.await.map_err(|_| "Cache unavailable".to_string())?
+    }
+
+    pub async fn search(
+        &self,
+        account_id: String,
+        query: String,
+    ) -> Result<Vec<MessageSummary>, String> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(CacheCmd::Search {
+                account_id,
+                query,
+                reply,
+            })
             .map_err(|_| "Cache unavailable".to_string())?;
         rx.await.map_err(|_| "Cache unavailable".to_string())?
     }
@@ -441,8 +551,12 @@ fn run_loop(conn: Connection, mut rx: mpsc::UnboundedReceiver<CacheCmd>) {
                     &live_email_ids,
                 ));
             }
-            CacheCmd::Search { query, reply } => {
-                let _ = reply.send(queries::do_search(&conn, &query));
+            CacheCmd::Search {
+                account_id,
+                query,
+                reply,
+            } => {
+                let _ = reply.send(queries::do_search(&conn, &account_id, &query));
             }
             CacheCmd::LoadThread {
                 account_id,
@@ -454,6 +568,24 @@ fn run_loop(conn: Connection, mut rx: mpsc::UnboundedReceiver<CacheCmd>) {
                     &conn,
                     &account_id,
                     &thread_id,
+                    &mailbox_ids,
+                ));
+            }
+            CacheCmd::UpsertFolders {
+                account_id,
+                folders,
+                reply,
+            } => {
+                let _ = reply.send(folder_queries::do_upsert_folders(&conn, &account_id, &folders));
+            }
+            CacheCmd::RemoveFolders {
+                account_id,
+                mailbox_ids,
+                reply,
+            } => {
+                let _ = reply.send(folder_queries::do_remove_folders_by_id(
+                    &conn,
+                    &account_id,
                     &mailbox_ids,
                 ));
             }
@@ -474,6 +606,38 @@ fn run_loop(conn: Connection, mut rx: mpsc::UnboundedReceiver<CacheCmd>) {
                 reply,
             } => {
                 let _ = reply.send(folder_queries::do_set_state(&conn, &account_id, &resource, &state));
+            }
+            CacheCmd::GetBackfillProgress {
+                account_id,
+                mailbox_id,
+                reply,
+            } => {
+                let _ = reply.send(queries::do_get_backfill_progress(&conn, &account_id, &mailbox_id));
+            }
+            CacheCmd::SetBackfillProgress {
+                account_id,
+                mailbox_id,
+                position,
+                total,
+                completed,
+                reply,
+            } => {
+                let _ = reply.send(queries::do_set_backfill_progress(
+                    &conn, &account_id, &mailbox_id, position, total, completed,
+                ));
+            }
+            CacheCmd::ListBackfillProgress {
+                account_id,
+                reply,
+            } => {
+                let _ = reply.send(queries::do_list_backfill_progress(&conn, &account_id));
+            }
+            CacheCmd::ResetBackfillProgress {
+                account_id,
+                mailbox_id,
+                reply,
+            } => {
+                let _ = reply.send(queries::do_reset_backfill_progress(&conn, &account_id, &mailbox_id));
             }
         }
     }

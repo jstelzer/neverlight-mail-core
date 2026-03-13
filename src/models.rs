@@ -33,13 +33,27 @@ pub struct MessageSummary {
     pub has_attachments: bool,
     /// JMAP thread ID (server-provided, stable string).
     pub thread_id: Option<String>,
-    /// JMAP mailbox ID this message belongs to.
-    pub mailbox_id: String,
+    /// All JMAP mailbox IDs this message belongs to (from `mailboxIds` object).
+    #[serde(default)]
+    pub mailbox_ids: Vec<String>,
+    /// Which folder the UI is showing this message in. Set by the query context
+    /// (the mailbox being viewed), not by the server.
+    pub context_mailbox_id: String,
     pub timestamp: i64,
     pub message_id: String,
     pub in_reply_to: Option<String>,
     pub reply_to: Option<String>,
     pub thread_depth: u32,
+}
+
+/// Per-mailbox backfill progress for background history walking.
+#[derive(Debug, Clone)]
+pub struct BackfillProgress {
+    pub account_id: String,
+    pub mailbox_id: String,
+    pub position: u32,
+    pub total: u32,
+    pub completed: bool,
 }
 
 /// Decoded attachment data for display and saving.

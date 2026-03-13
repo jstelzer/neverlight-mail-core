@@ -1,16 +1,16 @@
 use rusqlite::Connection;
 
 use super::flags::{flags_from_u8, flags_to_u8};
-use crate::models::{AttachmentData, MessageSummary};
+use crate::models::{AttachmentData, BackfillProgress, MessageSummary};
 
 /// Shared row-to-struct mapping for both `do_load_messages` and `do_search`.
 ///
 /// Expects columns in this order:
 ///   0: email_id, 1: subject, 2: sender, 3: date, 4: timestamp,
 ///   5: is_read, 6: is_starred, 7: has_attachments, 8: thread_id,
-///   9: flags_server, 10: flags_local, 11: pending_op, 12: mailbox_id,
+///   9: flags_server, 10: flags_local, 11: pending_op, 12: context_mailbox_id,
 ///   13: message_id, 14: in_reply_to, 15: thread_depth, 16: reply_to,
-///   17: recipient, 18: account_id
+///   17: recipient, 18: account_id, 19: mailbox_ids (GROUP_CONCAT)
 fn row_to_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<MessageSummary> {
     let flags_server: i32 = row.get::<_, Option<i32>>(9)?.unwrap_or(0);
     let flags_local: i32 = row.get::<_, Option<i32>>(10)?.unwrap_or(0);
@@ -24,6 +24,19 @@ fn row_to_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<MessageSummary> {
     };
     let (is_read, is_starred) = flags_from_u8(effective_flags);
 
+    let context_mailbox_id: String = row.get::<_, Option<String>>(12)?.unwrap_or_default();
+    let mailbox_ids_csv: Option<String> = row.get(19)?;
+    let mailbox_ids: Vec<String> = mailbox_ids_csv
+        .map(|csv| csv.split(',').map(|s| s.to_string()).collect())
+        .unwrap_or_else(|| {
+            // Fallback: if no junction data, use context_mailbox_id
+            if context_mailbox_id.is_empty() {
+                Vec::new()
+            } else {
+                vec![context_mailbox_id.clone()]
+            }
+        });
+
     Ok(MessageSummary {
         account_id: row.get(18)?,
         email_id: row.get(0)?,
@@ -36,7 +49,8 @@ fn row_to_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<MessageSummary> {
         is_starred,
         has_attachments: row.get::<_, i32>(7)? != 0,
         thread_id: row.get(8)?,
-        mailbox_id: row.get(12)?,
+        mailbox_ids,
+        context_mailbox_id,
         message_id: row.get::<_, Option<String>>(13)?.unwrap_or_default(),
         in_reply_to: row.get(14)?,
         thread_depth: row.get::<_, Option<u32>>(15)?.unwrap_or(0),
@@ -90,6 +104,17 @@ pub(super) fn do_save_messages(
         )
         .map_err(|e| format!("Cache prepare error: {e}"))?;
 
+    // Prepared statements for junction table sync
+    let mut delete_mbox_stmt = tx
+        .prepare("DELETE FROM message_mailboxes WHERE account_id = ?1 AND email_id = ?2")
+        .map_err(|e| format!("Cache prepare error: {e}"))?;
+    let mut insert_mbox_stmt = tx
+        .prepare(
+            "INSERT OR IGNORE INTO message_mailboxes (account_id, email_id, mailbox_id)
+             VALUES (?1, ?2, ?3)",
+        )
+        .map_err(|e| format!("Cache prepare error: {e}"))?;
+
     for m in messages {
         let server_flags = flags_to_u8(m.is_read, m.is_starred);
 
@@ -115,8 +140,28 @@ pub(super) fn do_save_messages(
                 m.to,
             ])
             .map_err(|e| format!("Cache upsert error: {e}"))?;
+
+        // Sync junction table: replace all mailbox associations
+        delete_mbox_stmt
+            .execute(rusqlite::params![account_id, m.email_id])
+            .map_err(|e| format!("Cache mbox delete error: {e}"))?;
+
+        if m.mailbox_ids.is_empty() {
+            // Fallback: use the mailbox_id parameter (legacy callers)
+            insert_mbox_stmt
+                .execute(rusqlite::params![account_id, m.email_id, mailbox_id])
+                .map_err(|e| format!("Cache mbox insert error: {e}"))?;
+        } else {
+            for mid in &m.mailbox_ids {
+                insert_mbox_stmt
+                    .execute(rusqlite::params![account_id, m.email_id, mid])
+                    .map_err(|e| format!("Cache mbox insert error: {e}"))?;
+            }
+        }
     }
     drop(upsert_stmt);
+    drop(delete_mbox_stmt);
+    drop(insert_mbox_stmt);
 
     tx.commit()
         .map_err(|e| format!("Cache commit error: {e}"))?;
@@ -132,19 +177,23 @@ pub(super) fn do_load_messages(
 ) -> Result<Vec<MessageSummary>, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT email_id, subject, sender, date, timestamp,
-                    is_read, is_starred, has_attachments, thread_id,
-                    flags_server, flags_local, pending_op, mailbox_id,
-                    message_id, in_reply_to, thread_depth, reply_to, recipient,
-                    account_id
-             FROM messages
-             WHERE mailbox_id = ?1 AND account_id = ?4
+            "SELECT m.email_id, m.subject, m.sender, m.date, m.timestamp,
+                    m.is_read, m.is_starred, m.has_attachments, m.thread_id,
+                    m.flags_server, m.flags_local, m.pending_op, ?1 AS context_mailbox_id,
+                    m.message_id, m.in_reply_to, m.thread_depth, m.reply_to, m.recipient,
+                    m.account_id,
+                    (SELECT GROUP_CONCAT(mm2.mailbox_id) FROM message_mailboxes mm2
+                     WHERE mm2.account_id = m.account_id AND mm2.email_id = m.email_id) AS mailbox_ids
+             FROM messages m
+             JOIN message_mailboxes mm ON mm.account_id = m.account_id AND mm.email_id = m.email_id
+             WHERE mm.mailbox_id = ?1 AND m.account_id = ?4
+             GROUP BY m.account_id, m.email_id
              ORDER BY
-                 MAX(timestamp) OVER (
-                     PARTITION BY COALESCE(thread_id, email_id)
+                 MAX(m.timestamp) OVER (
+                     PARTITION BY COALESCE(m.thread_id, m.email_id)
                  ) DESC,
-                 COALESCE(thread_id, email_id),
-                 timestamp ASC
+                 COALESCE(m.thread_id, m.email_id),
+                 m.timestamp ASC
              LIMIT ?2 OFFSET ?3",
         )
         .map_err(|e| format!("Cache prepare error: {e}"))?;
@@ -345,45 +394,60 @@ pub(super) fn do_remove_message(
     Ok(())
 }
 
-/// Remove cached messages for a mailbox that are not in the given set of live email IDs.
-/// Used after a full sync to prune messages that were deleted server-side.
+/// Remove junction rows for a mailbox that are not in the given set of live email IDs.
+/// Then clean up orphaned messages (no remaining mailbox associations).
+/// Used after a full sync to prune messages that were deleted/moved server-side.
 pub(super) fn do_prune_mailbox(
     conn: &Connection,
     account_id: &str,
     mailbox_id: &str,
     live_email_ids: &[String],
 ) -> Result<u64, String> {
-    if live_email_ids.is_empty() {
-        // Full mailbox is empty — delete everything for this mailbox
-        let deleted = conn
-            .execute(
-                "DELETE FROM messages WHERE account_id = ?1 AND mailbox_id = ?2",
-                rusqlite::params![account_id, mailbox_id],
-            )
-            .map_err(|e| format!("Cache prune error: {e}"))?;
-        return Ok(deleted as u64);
-    }
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| format!("Cache tx error: {e}"))?;
 
-    let placeholders: Vec<String> = (0..live_email_ids.len())
-        .map(|i| format!("?{}", i + 3))
-        .collect();
-    let sql = format!(
-        "DELETE FROM messages WHERE account_id = ?1 AND mailbox_id = ?2 AND email_id NOT IN ({})",
-        placeholders.join(", ")
-    );
+    // Step 1: Remove junction rows for stale messages in this mailbox
+    let deleted = if live_email_ids.is_empty() {
+        tx.execute(
+            "DELETE FROM message_mailboxes WHERE account_id = ?1 AND mailbox_id = ?2",
+            rusqlite::params![account_id, mailbox_id],
+        )
+        .map_err(|e| format!("Cache prune error: {e}"))? as u64
+    } else {
+        let placeholders: Vec<String> = (0..live_email_ids.len())
+            .map(|i| format!("?{}", i + 3))
+            .collect();
+        let sql = format!(
+            "DELETE FROM message_mailboxes WHERE account_id = ?1 AND mailbox_id = ?2 AND email_id NOT IN ({})",
+            placeholders.join(", ")
+        );
 
-    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-    params.push(Box::new(account_id.to_string()));
-    params.push(Box::new(mailbox_id.to_string()));
-    for id in live_email_ids {
-        params.push(Box::new(id.clone()));
-    }
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        params.push(Box::new(account_id.to_string()));
+        params.push(Box::new(mailbox_id.to_string()));
+        for id in live_email_ids {
+            params.push(Box::new(id.clone()));
+        }
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params.iter().map(|p| p.as_ref()).collect();
 
-    let deleted = conn
-        .execute(&sql, param_refs.as_slice())
-        .map_err(|e| format!("Cache prune error: {e}"))?;
-    Ok(deleted as u64)
+        tx.execute(&sql, param_refs.as_slice())
+            .map_err(|e| format!("Cache prune error: {e}"))? as u64
+    };
+
+    // Step 2: Clean up orphaned messages — those with no remaining mailbox associations
+    tx.execute(
+        "DELETE FROM messages WHERE account_id = ?1 AND email_id NOT IN (
+            SELECT email_id FROM message_mailboxes WHERE account_id = ?1
+        )",
+        rusqlite::params![account_id],
+    )
+    .map_err(|e| format!("Cache orphan cleanup error: {e}"))?;
+
+    tx.commit()
+        .map_err(|e| format!("Cache commit error: {e}"))?;
+    Ok(deleted)
 }
 
 /// Load all messages in a thread across the given mailbox IDs, sorted by timestamp ASC.
@@ -404,14 +468,18 @@ pub(super) fn do_load_thread(
     let in_clause = placeholders.join(", ");
 
     let sql = format!(
-        "SELECT email_id, subject, sender, date, timestamp,
-                is_read, is_starred, has_attachments, thread_id,
-                flags_server, flags_local, pending_op, mailbox_id,
-                message_id, in_reply_to, thread_depth, reply_to, recipient,
-                account_id
-         FROM messages
-         WHERE account_id = ?1 AND thread_id = ?2 AND mailbox_id IN ({in_clause})
-         ORDER BY timestamp ASC"
+        "SELECT m.email_id, m.subject, m.sender, m.date, m.timestamp,
+                m.is_read, m.is_starred, m.has_attachments, m.thread_id,
+                m.flags_server, m.flags_local, m.pending_op, m.mailbox_id,
+                m.message_id, m.in_reply_to, m.thread_depth, m.reply_to, m.recipient,
+                m.account_id,
+                (SELECT GROUP_CONCAT(mm2.mailbox_id) FROM message_mailboxes mm2
+                 WHERE mm2.account_id = m.account_id AND mm2.email_id = m.email_id) AS mailbox_ids
+         FROM messages m
+         JOIN message_mailboxes mm ON mm.account_id = m.account_id AND mm.email_id = m.email_id
+         WHERE m.account_id = ?1 AND m.thread_id = ?2 AND mm.mailbox_id IN ({in_clause})
+         GROUP BY m.account_id, m.email_id
+         ORDER BY m.timestamp ASC"
     );
 
     let mut stmt = conn
@@ -437,7 +505,11 @@ pub(super) fn do_load_thread(
     Ok(messages)
 }
 
-pub(super) fn do_search(conn: &Connection, query: &str) -> Result<Vec<MessageSummary>, String> {
+pub(super) fn do_search(
+    conn: &Connection,
+    account_id: &str,
+    query: &str,
+) -> Result<Vec<MessageSummary>, String> {
     let query = query.trim();
     if query.is_empty() {
         return Ok(Vec::new());
@@ -466,16 +538,19 @@ pub(super) fn do_search(conn: &Connection, query: &str) -> Result<Vec<MessageSum
                     m.is_read, m.is_starred, m.has_attachments, m.thread_id,
                     m.flags_server, m.flags_local, m.pending_op, m.mailbox_id,
                     m.message_id, m.in_reply_to, m.thread_depth, m.reply_to, m.recipient,
-                    m.account_id
+                    m.account_id,
+                    (SELECT GROUP_CONCAT(mm.mailbox_id) FROM message_mailboxes mm
+                     WHERE mm.account_id = m.account_id AND mm.email_id = m.email_id) AS mailbox_ids
              FROM messages m
-             WHERE m.rowid IN (SELECT rowid FROM message_fts WHERE message_fts MATCH ?1)
+             WHERE m.account_id = ?2
+               AND m.rowid IN (SELECT rowid FROM message_fts WHERE message_fts MATCH ?1)
              ORDER BY m.timestamp DESC
              LIMIT 200",
         )
         .map_err(|e| format!("Search prepare error: {e}"))?;
 
     let rows = stmt
-        .query_map([&fts_query], row_to_summary)
+        .query_map(rusqlite::params![&fts_query, account_id], row_to_summary)
         .map_err(|e| format!("Search query error: {e}"))?;
 
     let mut results = Vec::new();
@@ -483,6 +558,101 @@ pub(super) fn do_search(conn: &Connection, query: &str) -> Result<Vec<MessageSum
         results.push(row.map_err(|e| format!("Search row error: {e}"))?);
     }
     Ok(results)
+}
+
+// ---------------------------------------------------------------------------
+// Backfill progress
+// ---------------------------------------------------------------------------
+
+pub(super) fn do_get_backfill_progress(
+    conn: &Connection,
+    account_id: &str,
+    mailbox_id: &str,
+) -> Result<Option<BackfillProgress>, String> {
+    match conn.query_row(
+        "SELECT position, total, completed FROM backfill_progress
+         WHERE account_id = ?1 AND mailbox_id = ?2",
+        rusqlite::params![account_id, mailbox_id],
+        |row| {
+            let completed_int: i32 = row.get(2)?;
+            Ok(BackfillProgress {
+                account_id: account_id.to_string(),
+                mailbox_id: mailbox_id.to_string(),
+                position: row.get(0)?,
+                total: row.get(1)?,
+                completed: completed_int != 0,
+            })
+        },
+    ) {
+        Ok(p) => Ok(Some(p)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(format!("get_backfill_progress error: {e}")),
+    }
+}
+
+pub(super) fn do_set_backfill_progress(
+    conn: &Connection,
+    account_id: &str,
+    mailbox_id: &str,
+    position: u32,
+    total: u32,
+    completed: bool,
+) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO backfill_progress (account_id, mailbox_id, position, total, completed, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+         ON CONFLICT(account_id, mailbox_id) DO UPDATE SET
+             position = excluded.position,
+             total = excluded.total,
+             completed = excluded.completed,
+             updated_at = excluded.updated_at",
+        rusqlite::params![account_id, mailbox_id, position, total, completed as i32],
+    )
+    .map_err(|e| format!("set_backfill_progress error: {e}"))?;
+    Ok(())
+}
+
+pub(super) fn do_list_backfill_progress(
+    conn: &Connection,
+    account_id: &str,
+) -> Result<Vec<BackfillProgress>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT mailbox_id, position, total FROM backfill_progress
+             WHERE account_id = ?1 AND completed = 0",
+        )
+        .map_err(|e| format!("list_backfill_progress prepare error: {e}"))?;
+
+    let rows = stmt
+        .query_map([account_id], |row| {
+            Ok(BackfillProgress {
+                account_id: account_id.to_string(),
+                mailbox_id: row.get(0)?,
+                position: row.get(1)?,
+                total: row.get(2)?,
+                completed: false,
+            })
+        })
+        .map_err(|e| format!("list_backfill_progress query error: {e}"))?;
+
+    let mut results = Vec::new();
+    for row in rows {
+        results.push(row.map_err(|e| format!("list_backfill_progress row error: {e}"))?);
+    }
+    Ok(results)
+}
+
+pub(super) fn do_reset_backfill_progress(
+    conn: &Connection,
+    account_id: &str,
+    mailbox_id: &str,
+) -> Result<(), String> {
+    conn.execute(
+        "DELETE FROM backfill_progress WHERE account_id = ?1 AND mailbox_id = ?2",
+        rusqlite::params![account_id, mailbox_id],
+    )
+    .map_err(|e| format!("reset_backfill_progress error: {e}"))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -530,7 +700,8 @@ mod tests {
             is_starred: false,
             has_attachments: false,
             thread_id: None,
-            mailbox_id: mailbox_id.to_string(),
+            mailbox_ids: vec![mailbox_id.to_string()],
+            context_mailbox_id: mailbox_id.to_string(),
             timestamp: 100,
             message_id: format!("<{}@example.com>", email_id),
             in_reply_to: None,
@@ -895,7 +1066,7 @@ mod tests {
         do_save_messages(&conn, "a", "mb1", &[sample_message("e1", "mb1", "original subject")])
             .expect("save");
 
-        let hits_before = do_search(&conn, "original").expect("search before");
+        let hits_before = do_search(&conn, "a","original").expect("search before");
         assert_eq!(hits_before.len(), 1);
 
         // Update subject via upsert
@@ -903,10 +1074,10 @@ mod tests {
         updated.timestamp = 200;
         do_save_messages(&conn, "a", "mb1", &[updated]).expect("upsert");
 
-        let hits_old = do_search(&conn, "original").expect("search old");
+        let hits_old = do_search(&conn, "a","original").expect("search old");
         assert!(hits_old.is_empty(), "old subject should not match after update");
 
-        let hits_new = do_search(&conn, "completely").expect("search new");
+        let hits_new = do_search(&conn, "a","completely").expect("search new");
         assert_eq!(hits_new.len(), 1, "new subject should match after update");
     }
 
@@ -918,12 +1089,12 @@ mod tests {
         do_save_messages(&conn, "a", "mb1", &[sample_message("e1", "mb1", "findable subject")])
             .expect("save");
 
-        let hits_before = do_search(&conn, "findable").expect("search before");
+        let hits_before = do_search(&conn, "a","findable").expect("search before");
         assert_eq!(hits_before.len(), 1);
 
         do_remove_message(&conn, "a", "e1").expect("remove");
 
-        let hits_after = do_search(&conn, "findable").expect("search after");
+        let hits_after = do_search(&conn, "a","findable").expect("search after");
         assert!(hits_after.is_empty(), "FTS should not find deleted message");
     }
 
@@ -937,15 +1108,15 @@ mod tests {
         ]).expect("save");
 
         // Short prefix (< 3 chars) should not get wildcard expansion
-        let _hits_short = do_search(&conn, "in").expect("search short");
+        let _hits_short = do_search(&conn, "a","in").expect("search short");
         // FTS5 behavior: "in" won't match "Invoice" without wildcard
         // This is expected — short tokens are kept as-is
 
         // 3+ char prefix should match via wildcard expansion
-        let hits_prefix = do_search(&conn, "inv").expect("search prefix");
+        let hits_prefix = do_search(&conn, "a","inv").expect("search prefix");
         assert_eq!(hits_prefix.len(), 1, "prefix 'inv' should match 'Invoice'");
 
-        let hits_full = do_search(&conn, "invoice").expect("search full");
+        let hits_full = do_search(&conn, "a","invoice").expect("search full");
         assert_eq!(hits_full.len(), 1);
     }
 
@@ -1003,5 +1174,186 @@ mod tests {
         let thread_both = do_load_thread(&conn, "a", "t1", &["mb1".into(), "mb2".into()])
             .expect("load thread both");
         assert_eq!(thread_both.len(), 2);
+    }
+
+    #[test]
+    fn search_results_are_isolated_per_account() {
+        let conn = setup_conn();
+        do_save_folders(&conn, "a", &[sample_folder("mb1")]).expect("save folder a");
+        do_save_folders(&conn, "b", &[sample_folder("mb1")]).expect("save folder b");
+
+        do_save_messages(&conn, "a", "mb1", &[sample_message("e1", "mb1", "unique_needle_subject")])
+            .expect("save a");
+        do_save_messages(&conn, "b", "mb1", &[sample_message("e2", "mb1", "unique_needle_subject")])
+            .expect("save b");
+
+        let hits_a = do_search(&conn, "a", "unique_needle").expect("search a");
+        assert_eq!(hits_a.len(), 1, "search in account a should return only a's message");
+        assert_eq!(hits_a[0].email_id, "e1");
+
+        let hits_b = do_search(&conn, "b", "unique_needle").expect("search b");
+        assert_eq!(hits_b.len(), 1, "search in account b should return only b's message");
+        assert_eq!(hits_b[0].email_id, "e2");
+    }
+
+    // -- Multi-mailbox junction tests --
+
+    #[test]
+    fn message_in_multiple_mailboxes_loads_from_both() {
+        let conn = setup_conn();
+        do_save_folders(&conn, "a", &[
+            sample_folder_named("mb1", "INBOX"),
+            sample_folder_named("mb2", "Archive"),
+        ]).expect("save folders");
+
+        let mut msg = sample_message("e1", "mb1", "multi-mailbox msg");
+        msg.mailbox_ids = vec!["mb1".into(), "mb2".into()];
+        do_save_messages(&conn, "a", "mb1", &[msg]).expect("save");
+
+        let from_mb1 = do_load_messages(&conn, "a", "mb1", 50, 0).expect("load mb1");
+        assert_eq!(from_mb1.len(), 1, "message should appear in mb1");
+        assert_eq!(from_mb1[0].email_id, "e1");
+        assert_eq!(from_mb1[0].context_mailbox_id, "mb1");
+        assert!(from_mb1[0].mailbox_ids.contains(&"mb1".to_string()));
+        assert!(from_mb1[0].mailbox_ids.contains(&"mb2".to_string()));
+
+        let from_mb2 = do_load_messages(&conn, "a", "mb2", 50, 0).expect("load mb2");
+        assert_eq!(from_mb2.len(), 1, "message should appear in mb2");
+        assert_eq!(from_mb2[0].email_id, "e1");
+        assert_eq!(from_mb2[0].context_mailbox_id, "mb2");
+    }
+
+    #[test]
+    fn prune_removes_junction_row_not_message() {
+        let conn = setup_conn();
+        do_save_folders(&conn, "a", &[
+            sample_folder_named("mb1", "INBOX"),
+            sample_folder_named("mb2", "Archive"),
+        ]).expect("save folders");
+
+        let mut msg = sample_message("e1", "mb1", "multi-mailbox msg");
+        msg.mailbox_ids = vec!["mb1".into(), "mb2".into()];
+        do_save_messages(&conn, "a", "mb1", &[msg]).expect("save");
+
+        // Prune mb1 with empty live set — should remove junction row for mb1
+        let pruned = do_prune_mailbox(&conn, "a", "mb1", &[]).expect("prune");
+        assert_eq!(pruned, 1, "should remove one junction row");
+
+        // Message should be gone from mb1
+        let from_mb1 = do_load_messages(&conn, "a", "mb1", 50, 0).expect("load mb1");
+        assert!(from_mb1.is_empty(), "message should no longer appear in mb1");
+
+        // Message should still be loadable from mb2
+        let from_mb2 = do_load_messages(&conn, "a", "mb2", 50, 0).expect("load mb2");
+        assert_eq!(from_mb2.len(), 1, "message should still appear in mb2");
+        assert_eq!(from_mb2[0].email_id, "e1");
+    }
+
+    #[test]
+    fn delta_sync_move_removes_junction_row() {
+        let conn = setup_conn();
+        do_save_folders(&conn, "a", &[
+            sample_folder_named("mb1", "INBOX"),
+            sample_folder_named("mb2", "Archive"),
+        ]).expect("save folders");
+
+        // Message starts in both mb1 and mb2
+        let mut msg = sample_message("e1", "mb1", "will be moved");
+        msg.mailbox_ids = vec!["mb1".into(), "mb2".into()];
+        do_save_messages(&conn, "a", "mb1", &[msg]).expect("save initial");
+
+        let from_mb1 = do_load_messages(&conn, "a", "mb1", 50, 0).expect("load mb1 before");
+        assert_eq!(from_mb1.len(), 1);
+
+        // Simulate delta sync: message updated to only be in mb2
+        let mut moved = sample_message("e1", "mb2", "will be moved");
+        moved.mailbox_ids = vec!["mb2".into()];
+        do_save_messages(&conn, "a", "mb2", &[moved]).expect("save after move");
+
+        // Message should be gone from mb1
+        let from_mb1 = do_load_messages(&conn, "a", "mb1", 50, 0).expect("load mb1 after");
+        assert!(from_mb1.is_empty(), "message should no longer appear in mb1 after move");
+
+        // Message should still be in mb2
+        let from_mb2 = do_load_messages(&conn, "a", "mb2", 50, 0).expect("load mb2 after");
+        assert_eq!(from_mb2.len(), 1);
+        assert_eq!(from_mb2[0].email_id, "e1");
+        assert_eq!(from_mb2[0].mailbox_ids, vec!["mb2".to_string()]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Backfill progress tests
+    // -----------------------------------------------------------------------
+
+    use super::{
+        do_get_backfill_progress, do_list_backfill_progress,
+        do_reset_backfill_progress, do_set_backfill_progress,
+    };
+
+    #[test]
+    fn backfill_progress_upsert_and_read() {
+        let conn = setup_conn();
+
+        // No prior progress → None
+        let none = do_get_backfill_progress(&conn, "a", "mb1").expect("get empty");
+        assert!(none.is_none());
+
+        // Set progress
+        do_set_backfill_progress(&conn, "a", "mb1", 100, 5000, false).expect("set");
+        let p = do_get_backfill_progress(&conn, "a", "mb1").expect("get").expect("should exist");
+        assert_eq!(p.position, 100);
+        assert_eq!(p.total, 5000);
+        assert!(!p.completed);
+
+        // Upsert updates existing row
+        do_set_backfill_progress(&conn, "a", "mb1", 200, 5000, false).expect("upsert");
+        let p = do_get_backfill_progress(&conn, "a", "mb1").expect("get").expect("should exist");
+        assert_eq!(p.position, 200);
+    }
+
+    #[test]
+    fn list_backfill_returns_incomplete_only() {
+        let conn = setup_conn();
+
+        do_set_backfill_progress(&conn, "a", "mb1", 100, 5000, false).expect("set mb1");
+        do_set_backfill_progress(&conn, "a", "mb2", 3000, 3000, true).expect("set mb2 completed");
+        do_set_backfill_progress(&conn, "a", "mb3", 50, 1000, false).expect("set mb3");
+
+        let incomplete = do_list_backfill_progress(&conn, "a").expect("list");
+        assert_eq!(incomplete.len(), 2);
+        let ids: Vec<&str> = incomplete.iter().map(|p| p.mailbox_id.as_str()).collect();
+        assert!(ids.contains(&"mb1"));
+        assert!(ids.contains(&"mb3"));
+        assert!(!ids.contains(&"mb2"));
+    }
+
+    #[test]
+    fn reset_backfill_deletes_row() {
+        let conn = setup_conn();
+
+        do_set_backfill_progress(&conn, "a", "mb1", 500, 5000, false).expect("set");
+        do_reset_backfill_progress(&conn, "a", "mb1").expect("reset");
+        let none = do_get_backfill_progress(&conn, "a", "mb1").expect("get after reset");
+        assert!(none.is_none());
+    }
+
+    #[test]
+    fn backfill_progress_isolated_per_account() {
+        let conn = setup_conn();
+
+        do_set_backfill_progress(&conn, "a", "mb1", 100, 5000, false).expect("set a");
+        do_set_backfill_progress(&conn, "b", "mb1", 200, 3000, false).expect("set b");
+
+        let a = do_get_backfill_progress(&conn, "a", "mb1").expect("get a").expect("a exists");
+        let b = do_get_backfill_progress(&conn, "b", "mb1").expect("get b").expect("b exists");
+        assert_eq!(a.position, 100);
+        assert_eq!(a.total, 5000);
+        assert_eq!(b.position, 200);
+        assert_eq!(b.total, 3000);
+
+        // List only returns for the specified account
+        let a_list = do_list_backfill_progress(&conn, "a").expect("list a");
+        assert_eq!(a_list.len(), 1);
+        assert_eq!(a_list[0].account_id, "a");
     }
 }
