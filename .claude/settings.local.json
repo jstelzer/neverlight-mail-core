@@ -4,7 +4,9 @@
       "Bash(cargo metadata:*)",
       "Bash(cargo test:*)",
       "Bash(cargo:*)",
-      "Read(//home/mental/projects/neverlight-forge-env/neverlight-mail/**)"
+      "Read(//home/mental/projects/neverlight-forge-env/neverlight-mail/**)",
+      "Bash(NEVERLIGHT_MAIL_JMAP_TOKEN=\"fmu1-4c264053-21ae732bbbe51e53ca3cbc952e42b718-0-05275317a9e55d869b1ade24468d2bcd\" NEVERLIGHT_MAIL_USER=\"jstelzer@fastmail.com\" cargo test --test jmap_integration fastmail_advertises_push_and_submission -- --nocapture 2>&1)",
+      "Bash(find /home/mental/projects/neverlight-forge-env/neverlight-mail-tui/src -name \"*.rs\" -type f 2>/dev/null | head -20)"
     ]
   }
 }

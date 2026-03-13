@@ -206,6 +206,16 @@ pub enum ConfigNeedsInput {
         username: String,
         error: Option<String>,
     },
+    /// OAuth refresh token is stale — need to redo the browser auth flow.
+    /// Unlike `TokenOnly`, the user can't paste a token; they must go through
+    /// the OAuth browser redirect again.
+    OAuthReauth {
+        account_id: AccountId,
+        label: String,
+        jmap_url: String,
+        username: String,
+        error: String,
+    },
 }
 
 // ---------------------------------------------------------------------------

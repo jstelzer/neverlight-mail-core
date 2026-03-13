@@ -67,6 +67,15 @@ pub enum SetupRequest {
     },
     /// Editing an existing account (all fields, pre-filled).
     Edit { account_id: AccountId },
+    /// OAuth refresh token is stale — need browser re-auth.
+    /// No fields are editable; the UI should show account info (read-only)
+    /// and an "Authorize with browser" button.
+    Reauth {
+        account_id: AccountId,
+        jmap_url: String,
+        username: String,
+        reason: String,
+    },
 }
 
 impl SetupRequest {
@@ -85,6 +94,18 @@ impl SetupRequest {
                 username: username.clone(),
                 reason: error.clone(),
             },
+            ConfigNeedsInput::OAuthReauth {
+                account_id,
+                jmap_url,
+                username,
+                error,
+                ..
+            } => Self::Reauth {
+                account_id: account_id.clone(),
+                jmap_url: jmap_url.clone(),
+                username: username.clone(),
+                reason: error.clone(),
+            },
         }
     }
 
@@ -93,6 +114,7 @@ impl SetupRequest {
         match self {
             Self::Full | Self::Edit { .. } => FieldId::FULL,
             Self::TokenOnly { .. } => FieldId::TOKEN_ONLY,
+            Self::Reauth { .. } => &[], // No editable fields — OAuth browser flow only
         }
     }
 
@@ -149,6 +171,22 @@ impl SetupModel {
                 active_field: FieldId::Token,
                 error: error.clone(),
             },
+            ConfigNeedsInput::OAuthReauth {
+                jmap_url,
+                username,
+                label,
+                error,
+                ..
+            } => Self {
+                request,
+                label: label.clone(),
+                jmap_url: jmap_url.clone(),
+                username: username.clone(),
+                token: String::new(),
+                email: String::new(),
+                active_field: FieldId::Token, // no editable fields, but need a default
+                error: Some(error.clone()),
+            },
         }
     }
 
@@ -167,12 +205,30 @@ impl SetupModel {
         }
     }
 
+    /// Whether this setup requires an OAuth browser re-auth flow.
+    /// Frontends should show an "Authorize with browser" button instead of
+    /// (or in addition to) the normal form fields.
+    pub fn is_reauth(&self) -> bool {
+        matches!(self.request, SetupRequest::Reauth { .. })
+    }
+
+    /// The account ID for Reauth/TokenOnly/Edit requests.
+    pub fn account_id(&self) -> Option<&str> {
+        match &self.request {
+            SetupRequest::Reauth { account_id, .. }
+            | SetupRequest::TokenOnly { account_id, .. }
+            | SetupRequest::Edit { account_id } => Some(account_id),
+            SetupRequest::Full => None,
+        }
+    }
+
     /// Title string for the setup dialog/form.
     pub fn title(&self) -> &str {
         match &self.request {
             SetupRequest::Full => "Account Setup",
             SetupRequest::TokenOnly { .. } => "Enter API Token",
             SetupRequest::Edit { .. } => "Edit Account",
+            SetupRequest::Reauth { .. } => "Re-authorize Account",
         }
     }
 
@@ -408,6 +464,14 @@ impl SetupModel {
                 }
                 SetupTransition::Finished(SetupOutcome::Configured)
             }
+
+            SetupRequest::Reauth { .. } => {
+                // Reauth is driven by the frontend's OAuth flow, not the form.
+                // Submit is a no-op; the frontend should trigger OAuth and call
+                // `complete_reauth()` with the new tokens.
+                self.error = Some("Use the browser sign-in button to re-authorize".into());
+                SetupTransition::Continue
+            }
         }
     }
 
@@ -495,6 +559,12 @@ pub struct SetupFields {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Check whether a connect error indicates an OAuth ratchet/grant failure
+/// that requires browser re-authorization.
+pub fn is_oauth_reauth_error(error: &str) -> bool {
+    error.contains("invalid_grant") || error.contains("OAuth token refresh failed")
+}
 
 /// Store a token in keyring, fall back to plaintext.
 pub fn store_token(username: &str, jmap_url: &str, token: &str) -> PasswordBackend {
