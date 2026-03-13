@@ -30,6 +30,11 @@ impl CacheHandle {
         let conn =
             Connection::open(&db_file).map_err(|e| format!("Failed to open cache db: {e}"))?;
 
+        // Enable foreign key enforcement so ON DELETE CASCADE works
+        // (e.g., pruning messages cascades to attachments).
+        conn.execute_batch("PRAGMA foreign_keys = ON;")
+            .map_err(|e| format!("Failed to enable foreign keys: {e}"))?;
+
         conn.execute_batch(SCHEMA)
             .map_err(|e| format!("Failed to init cache schema: {e}"))?;
 

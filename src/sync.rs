@@ -200,79 +200,95 @@ async fn sync_emails_delta(
     resource: &str,
     page_size: u32,
 ) -> Result<Vec<MessageSummary>, JmapError> {
-    let call = client.method(
-        "Email/changes",
-        serde_json::json!({ "sinceState": since_state }),
-        "ec0",
-    );
+    let mut current_state = since_state.to_string();
 
-    let resp = match client.call(vec![call]).await {
-        Err(JmapError::CannotCalculateChanges) => {
-            log::info!("Email cannotCalculateChanges for {} — full resync", mailbox_id);
-            return sync_emails_full(client, cache, account_id, mailbox_id, resource, page_size).await;
-        }
-        other => other?,
-    };
-    let mc = resp.method_responses.iter().find(|mc| mc.2 == "ec0")
-        .ok_or_else(|| JmapError::RequestError("Missing Email/changes response".into()))?;
+    // Loop to drain all pending changes (server may paginate via hasMoreChanges).
+    // Cap iterations to avoid runaway loops if the server misbehaves.
+    for iteration in 0..50 {
+        let call = client.method(
+            "Email/changes",
+            serde_json::json!({ "sinceState": current_state }),
+            "ec0",
+        );
 
-    let changes = parse_changes_response(&mc.1)?;
+        let resp = match client.call(vec![call]).await {
+            Err(JmapError::CannotCalculateChanges) => {
+                log::info!("Email cannotCalculateChanges for {} — full resync", mailbox_id);
+                return sync_emails_full(client, cache, account_id, mailbox_id, resource, page_size).await;
+            }
+            other => other?,
+        };
+        let mc = resp.method_responses.iter().find(|mc| mc.2 == "ec0")
+            .ok_or_else(|| JmapError::RequestError("Missing Email/changes response".into()))?;
 
-    // Remove destroyed emails from cache
-    for id in &changes.destroyed {
-        let _ = cache.remove_message(account_id.to_string(), id.clone()).await;
-    }
+        let changes = parse_changes_response(&mc.1)?;
 
-    // Fetch created + updated emails
-    let fetch_ids: Vec<String> = changes.created.iter()
-        .chain(changes.updated.iter())
-        .cloned()
-        .collect();
-
-    if !fetch_ids.is_empty() {
-        let mut summaries = email::get_summaries(client, &fetch_ids, mailbox_id).await?;
-        for m in &mut summaries {
-            m.account_id = account_id.to_string();
+        // Remove destroyed emails from cache
+        for id in &changes.destroyed {
+            let _ = cache.remove_message(account_id.to_string(), id.clone()).await;
         }
 
-        // Partition: messages still in this mailbox vs. moved elsewhere.
-        // Email/changes is account-global, so updated messages may have moved
-        // to a different mailbox (e.g., trash). The server's mailboxIds tells
-        // us where the message actually lives now.
-        let mut still_here = Vec::new();
-        let mut moved_away = Vec::new();
-        for m in summaries {
-            if m.mailbox_id == mailbox_id {
-                still_here.push(m);
-            } else {
-                moved_away.push(m);
+        // Fetch created + updated emails
+        let fetch_ids: Vec<String> = changes.created.iter()
+            .chain(changes.updated.iter())
+            .cloned()
+            .collect();
+
+        if !fetch_ids.is_empty() {
+            let mut summaries = email::get_summaries(client, &fetch_ids, mailbox_id).await?;
+            for m in &mut summaries {
+                m.account_id = account_id.to_string();
+            }
+
+            // Partition: messages still in this mailbox vs. moved elsewhere.
+            // Email/changes is account-global, so updated messages may have moved
+            // to a different mailbox (e.g., trash). The server's mailboxIds tells
+            // us where the message actually lives now.
+            let mut still_here = Vec::new();
+            let mut moved_away = Vec::new();
+            for m in summaries {
+                if m.mailbox_id == mailbox_id {
+                    still_here.push(m);
+                } else {
+                    moved_away.push(m);
+                }
+            }
+
+            if !still_here.is_empty() {
+                let _ = cache.save_messages(
+                    account_id.to_string(),
+                    mailbox_id.to_string(),
+                    still_here,
+                ).await;
+            }
+
+            // Remove messages that moved out of this mailbox
+            for m in &moved_away {
+                log::debug!(
+                    "Delta sync: email {} moved from {} to {} — removing from cache",
+                    m.email_id, mailbox_id, m.mailbox_id,
+                );
+                let _ = cache.remove_message(account_id.to_string(), m.email_id.clone()).await;
             }
         }
 
-        if !still_here.is_empty() {
-            let _ = cache.save_messages(
-                account_id.to_string(),
-                mailbox_id.to_string(),
-                still_here,
-            ).await;
+        // Update state after each batch so progress is durable
+        let _ = cache.set_state(
+            account_id.to_string(),
+            resource.to_string(),
+            changes.new_state.0.clone(),
+        ).await;
+
+        if !changes.has_more_changes {
+            break;
         }
 
-        // Remove messages that moved out of this mailbox
-        for m in &moved_away {
-            log::debug!(
-                "Delta sync: email {} moved from {} to {} — removing from cache",
-                m.email_id, mailbox_id, m.mailbox_id,
-            );
-            let _ = cache.remove_message(account_id.to_string(), m.email_id.clone()).await;
-        }
+        log::info!(
+            "Email/changes hasMoreChanges for {} (iteration {}) — fetching next batch",
+            mailbox_id, iteration
+        );
+        current_state = changes.new_state.0;
     }
-
-    // Update state
-    let _ = cache.set_state(
-        account_id.to_string(),
-        resource.to_string(),
-        changes.new_state.0.clone(),
-    ).await;
 
     // Return full list from cache
     let messages = cache.load_messages(
