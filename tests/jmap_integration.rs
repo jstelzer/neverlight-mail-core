@@ -499,6 +499,78 @@ async fn session_provides_event_source_url() {
 }
 
 // ---------------------------------------------------------------------------
+// Capability discovery
+// ---------------------------------------------------------------------------
+
+/// Prove that Fastmail advertises push and submission capabilities.
+///
+/// Fetches the raw JMAP session JSON and checks for the URNs that
+/// `discovery::parse_session_object` maps to `supports_push` and
+/// `supports_submission`.  If both are present, any config showing
+/// `false` was written without running discovery.
+#[tokio::test]
+async fn fastmail_advertises_push_and_submission() {
+    skip_if_no_env!();
+    let token = std::env::var("NEVERLIGHT_MAIL_JMAP_TOKEN").unwrap();
+    let user = std::env::var("NEVERLIGHT_MAIL_USER").unwrap();
+
+    let http = reqwest::Client::new();
+    let req = http.get(FASTMAIL_SESSION_URL);
+    let req = if token.starts_with("fmu1-") {
+        req.bearer_auth(&token)
+    } else {
+        req.basic_auth(&user, Some(&token))
+    };
+
+    let resp = req.send().await.expect("session fetch failed");
+
+    assert!(resp.status().is_success(), "HTTP {}", resp.status());
+
+    let session: serde_json::Value = resp.json().await.expect("invalid JSON");
+
+    let capabilities = session
+        .get("capabilities")
+        .and_then(|v| v.as_object())
+        .expect("missing capabilities");
+
+    // Push: websocket URN or eventSourceUrl
+    let has_websocket = capabilities.contains_key("urn:ietf:params:jmap:websocket");
+    let has_event_source = session
+        .get("eventSourceUrl")
+        .and_then(|v| v.as_str())
+        .is_some();
+    assert!(
+        has_websocket || has_event_source,
+        "Fastmail should advertise push via websocket ({has_websocket}) or eventSourceUrl ({has_event_source})"
+    );
+
+    // Submission
+    assert!(
+        capabilities.contains_key("urn:ietf:params:jmap:submission"),
+        "Fastmail should advertise urn:ietf:params:jmap:submission"
+    );
+
+    // Also verify our parsed session agrees
+    let (_session_parsed, client) = connect_client().await;
+    assert!(
+        client.event_source_url.is_some(),
+        "JmapClient should have event_source_url"
+    );
+
+    // Print all capabilities for visibility
+    eprintln!("Fastmail session capabilities:");
+    for key in capabilities.keys() {
+        eprintln!("  {key}");
+    }
+    if has_event_source {
+        eprintln!(
+            "eventSourceUrl: {}",
+            session["eventSourceUrl"].as_str().unwrap()
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Phase 4a: Server-side search
 // ---------------------------------------------------------------------------
 

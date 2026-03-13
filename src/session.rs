@@ -18,6 +18,10 @@ pub struct JmapSession {
     pub max_objects_in_get: u32,
     pub max_objects_in_set: u32,
     pub max_calls_in_request: u32,
+    /// Server advertises push (WebSocket or EventSource).
+    pub supports_push: bool,
+    /// Server advertises `urn:ietf:params:jmap:submission`.
+    pub supports_submission: bool,
 }
 
 impl JmapSession {
@@ -25,9 +29,12 @@ impl JmapSession {
     ///
     /// For app passwords, auto-detects Bearer vs Basic from token prefix.
     /// For OAuth, uses the access token as Bearer (caller must refresh first).
+    ///
+    /// Auto-heals stale capability flags in the on-disk config when the
+    /// server's advertised capabilities differ from what was saved.
     pub async fn connect(config: &AccountConfig) -> Result<(Self, JmapClient), String> {
         use crate::config::AuthMethod;
-        match &config.auth {
+        let result = match &config.auth {
             AuthMethod::AppPassword { token } => {
                 if token.starts_with("fmu1-") {
                     Self::connect_with_token(&config.jmap_url, token).await
@@ -46,7 +53,7 @@ impl JmapSession {
                 // If we have a cached access token, try it first
                 if let Some(token) = access_token.as_deref() {
                     match Self::connect_with_token(&config.jmap_url, token).await {
-                        Ok(result) => return Ok(result),
+                        Ok(result) => return Self::maybe_heal_capabilities(config, result),
                         Err(e) => {
                             log::info!("Cached OAuth access token failed ({}), refreshing", e);
                         }
@@ -85,7 +92,42 @@ impl JmapSession {
 
                 Self::connect_with_token(&config.jmap_url, &token_set.access_token).await
             }
+        };
+
+        match result {
+            Ok(pair) => Self::maybe_heal_capabilities(config, pair),
+            Err(e) => Err(e),
         }
+    }
+
+    /// Compare discovered capabilities against config; update the file if stale.
+    fn maybe_heal_capabilities(
+        config: &AccountConfig,
+        pair: (Self, JmapClient),
+    ) -> Result<(Self, JmapClient), String> {
+        let (ref session, _) = pair;
+        let stale_push = config.capabilities.supports_push != session.supports_push;
+        let stale_submission = config.capabilities.supports_submission != session.supports_submission;
+
+        if stale_push || stale_submission {
+            log::info!(
+                "Healing capabilities for account {}: push {}→{}, submission {}→{}",
+                config.id,
+                config.capabilities.supports_push, session.supports_push,
+                config.capabilities.supports_submission, session.supports_submission,
+            );
+            if let Ok(Some(mut multi)) = crate::config::MultiAccountFileConfig::load() {
+                if let Some(fac) = multi.accounts.iter_mut().find(|a| a.id == config.id) {
+                    fac.capabilities.supports_push = session.supports_push;
+                    fac.capabilities.supports_submission = session.supports_submission;
+                    if let Err(e) = multi.save() {
+                        log::warn!("Failed to save healed capabilities: {e}");
+                    }
+                }
+            }
+        }
+
+        Ok(pair)
     }
 
     /// Connect using a bearer token (e.g. Fastmail API token with `fmu1-` prefix).
@@ -216,6 +258,11 @@ impl JmapSession {
             .and_then(|v| v.as_u64())
             .unwrap_or(16) as u32;
 
+        let supports_push = capabilities.contains_key("urn:ietf:params:jmap:websocket")
+            || event_source_url.is_some();
+        let supports_submission =
+            capabilities.contains_key("urn:ietf:params:jmap:submission");
+
         Ok(JmapSession {
             api_url,
             upload_url,
@@ -226,6 +273,8 @@ impl JmapSession {
             max_objects_in_get,
             max_objects_in_set,
             max_calls_in_request,
+            supports_push,
+            supports_submission,
         })
     }
 }
@@ -299,6 +348,8 @@ mod tests {
         assert_eq!(session.max_objects_in_get, 1000);
         assert_eq!(session.max_calls_in_request, 64);
         assert!(session.event_source_url.is_some());
+        assert!(session.supports_push);
+        assert!(session.supports_submission);
     }
 
     #[test]
