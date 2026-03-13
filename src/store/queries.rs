@@ -490,8 +490,9 @@ mod tests {
     use rusqlite::Connection;
 
     use super::{
-        do_load_body, do_load_messages, do_prune_mailbox, do_remove_message,
-        do_save_body, do_save_messages, do_update_flags,
+        do_clear_pending_op, do_load_body, do_load_messages, do_load_thread,
+        do_prune_mailbox, do_remove_message, do_revert_pending_op,
+        do_save_body, do_save_messages, do_search, do_update_flags,
     };
     use crate::models::{AttachmentData, Folder, MessageSummary};
     use crate::store::folder_queries::do_save_folders;
@@ -707,5 +708,300 @@ mod tests {
 
         let after = do_load_messages(&conn, "a", "mb1", 50, 0).expect("load after");
         assert_eq!(after.len(), 2);
+    }
+
+    // -- Dual-truth flag invariant tests --
+
+    #[test]
+    fn pending_op_preserved_during_sync_upsert() {
+        let conn = setup_conn();
+        do_save_folders(&conn, "a", &[sample_folder("mb1")]).expect("save folder");
+
+        // Insert a message (unread, unstarred)
+        do_save_messages(&conn, "a", "mb1", &[sample_message("e1", "mb1", "test")])
+            .expect("save");
+
+        // User marks it read+starred (optimistic)
+        do_update_flags(&conn, "a", "e1", flags_to_u8(true, true), "mark_read_starred")
+            .expect("update flags");
+
+        let mid = do_load_messages(&conn, "a", "mb1", 50, 0).expect("load mid");
+        assert!(mid[0].is_read, "optimistic read flag should show");
+        assert!(mid[0].is_starred, "optimistic star flag should show");
+
+        // Background sync upserts the same message (server still shows unread)
+        let server_msg = sample_message("e1", "mb1", "test — updated subject");
+        do_save_messages(&conn, "a", "mb1", &[server_msg]).expect("sync upsert");
+
+        // Optimistic flags must survive the sync upsert
+        let after = do_load_messages(&conn, "a", "mb1", 50, 0).expect("load after");
+        assert_eq!(after[0].subject, "test — updated subject", "subject should update");
+        assert!(after[0].is_read, "optimistic read flag must survive sync");
+        assert!(after[0].is_starred, "optimistic star flag must survive sync");
+    }
+
+    #[test]
+    fn clear_pending_op_applies_server_flags() {
+        let conn = setup_conn();
+        do_save_folders(&conn, "a", &[sample_folder("mb1")]).expect("save folder");
+
+        do_save_messages(&conn, "a", "mb1", &[sample_message("e1", "mb1", "test")])
+            .expect("save");
+
+        // User marks read (optimistic)
+        do_update_flags(&conn, "a", "e1", flags_to_u8(true, false), "mark_read")
+            .expect("update flags");
+
+        // Server confirms with read=true, starred=false
+        do_clear_pending_op(&conn, "a", "e1", flags_to_u8(true, false))
+            .expect("clear pending");
+
+        let after = do_load_messages(&conn, "a", "mb1", 50, 0).expect("load after");
+        assert!(after[0].is_read);
+        assert!(!after[0].is_starred);
+
+        // Verify pending_op is cleared by checking that a subsequent sync
+        // upsert *does* overwrite flags (no pending_op to protect them)
+        let mut server_msg = sample_message("e1", "mb1", "test");
+        server_msg.is_read = false; // server says unread now
+        do_save_messages(&conn, "a", "mb1", &[server_msg]).expect("sync upsert");
+
+        let final_state = do_load_messages(&conn, "a", "mb1", 50, 0).expect("load final");
+        assert!(!final_state[0].is_read, "without pending_op, sync should overwrite flags");
+    }
+
+    #[test]
+    fn revert_pending_op_restores_server_flags() {
+        let conn = setup_conn();
+        do_save_folders(&conn, "a", &[sample_folder("mb1")]).expect("save folder");
+
+        // Insert as read
+        let mut msg = sample_message("e1", "mb1", "test");
+        msg.is_read = true;
+        do_save_messages(&conn, "a", "mb1", &[msg]).expect("save");
+
+        // User marks unread (optimistic)
+        do_update_flags(&conn, "a", "e1", flags_to_u8(false, false), "mark_unread")
+            .expect("update flags");
+
+        let mid = do_load_messages(&conn, "a", "mb1", 50, 0).expect("load mid");
+        assert!(!mid[0].is_read, "optimistic: should show unread");
+
+        // Server rejects — revert
+        do_revert_pending_op(&conn, "a", "e1").expect("revert");
+
+        let after = do_load_messages(&conn, "a", "mb1", 50, 0).expect("load after");
+        assert!(after[0].is_read, "revert should restore server read flag");
+    }
+
+    #[test]
+    fn flag_encoding_round_trips_all_combinations() {
+        use crate::store::flags::flags_from_u8;
+
+        assert_eq!(flags_to_u8(false, false), 0);
+        assert_eq!(flags_to_u8(true, false), 1);
+        assert_eq!(flags_to_u8(false, true), 2);
+        assert_eq!(flags_to_u8(true, true), 3);
+
+        assert_eq!(flags_from_u8(0), (false, false));
+        assert_eq!(flags_from_u8(1), (true, false));
+        assert_eq!(flags_from_u8(2), (false, true));
+        assert_eq!(flags_from_u8(3), (true, true));
+
+        // Round-trip
+        for is_read in [false, true] {
+            for is_starred in [false, true] {
+                let encoded = flags_to_u8(is_read, is_starred);
+                let (r, s) = flags_from_u8(encoded);
+                assert_eq!(r, is_read);
+                assert_eq!(s, is_starred);
+            }
+        }
+    }
+
+    // -- Body cache tests --
+
+    #[test]
+    fn upsert_preserves_cached_body() {
+        let conn = setup_conn();
+        do_save_folders(&conn, "a", &[sample_folder("mb1")]).expect("save folder");
+
+        do_save_messages(&conn, "a", "mb1", &[sample_message("e1", "mb1", "test")])
+            .expect("save");
+
+        // Cache a body
+        do_save_body(&conn, "a", "e1", "# Hello", "Hello", &[]).expect("save body");
+
+        let body_before = do_load_body(&conn, "a", "e1").expect("load body before");
+        assert!(body_before.is_some());
+
+        // Sync upserts the same message (new subject from server)
+        let mut updated = sample_message("e1", "mb1", "updated subject");
+        updated.timestamp = 200;
+        do_save_messages(&conn, "a", "mb1", &[updated]).expect("sync upsert");
+
+        // Body should still be cached
+        let body_after = do_load_body(&conn, "a", "e1").expect("load body after");
+        assert!(body_after.is_some(), "upsert must not NULL out cached body");
+        let (md, _, _) = body_after.unwrap();
+        assert_eq!(md, "# Hello");
+    }
+
+    // -- Folder cascade tests --
+
+    #[test]
+    fn folder_removal_cascades_to_messages_and_attachments() {
+        let conn = setup_conn();
+        do_save_folders(&conn, "a", &[
+            sample_folder_named("mb1", "INBOX"),
+            sample_folder_named("mb2", "Trash"),
+        ]).expect("save folders");
+
+        do_save_messages(&conn, "a", "mb1", &[sample_message("e1", "mb1", "inbox msg")])
+            .expect("save mb1 msg");
+        do_save_messages(&conn, "a", "mb2", &[sample_message("e2", "mb2", "trash msg")])
+            .expect("save mb2 msg");
+
+        // Save a body+attachment for the trash message
+        do_save_body(&conn, "a", "e2", "# body", "body", &[AttachmentData {
+            filename: "file.txt".into(),
+            mime_type: "text/plain".into(),
+            data: b"data".to_vec(),
+        }]).expect("save body");
+
+        // Now sync folders with only INBOX — Trash is gone
+        do_save_folders(&conn, "a", &[sample_folder_named("mb1", "INBOX")])
+            .expect("save folders update");
+
+        // Trash message and its attachments should be gone
+        let mb2 = do_load_messages(&conn, "a", "mb2", 50, 0).expect("load mb2");
+        assert!(mb2.is_empty(), "messages in removed folder should be deleted");
+
+        let body = do_load_body(&conn, "a", "e2").expect("load body");
+        assert!(body.is_none(), "body of removed message should be gone");
+
+        // Inbox message should be untouched
+        let mb1 = do_load_messages(&conn, "a", "mb1", 50, 0).expect("load mb1");
+        assert_eq!(mb1.len(), 1);
+    }
+
+    // -- FTS tests --
+
+    #[test]
+    fn fts_finds_updated_subject() {
+        let conn = setup_conn();
+        do_save_folders(&conn, "a", &[sample_folder("mb1")]).expect("save folder");
+
+        do_save_messages(&conn, "a", "mb1", &[sample_message("e1", "mb1", "original subject")])
+            .expect("save");
+
+        let hits_before = do_search(&conn, "original").expect("search before");
+        assert_eq!(hits_before.len(), 1);
+
+        // Update subject via upsert
+        let mut updated = sample_message("e1", "mb1", "completely different");
+        updated.timestamp = 200;
+        do_save_messages(&conn, "a", "mb1", &[updated]).expect("upsert");
+
+        let hits_old = do_search(&conn, "original").expect("search old");
+        assert!(hits_old.is_empty(), "old subject should not match after update");
+
+        let hits_new = do_search(&conn, "completely").expect("search new");
+        assert_eq!(hits_new.len(), 1, "new subject should match after update");
+    }
+
+    #[test]
+    fn fts_removes_deleted_message() {
+        let conn = setup_conn();
+        do_save_folders(&conn, "a", &[sample_folder("mb1")]).expect("save folder");
+
+        do_save_messages(&conn, "a", "mb1", &[sample_message("e1", "mb1", "findable subject")])
+            .expect("save");
+
+        let hits_before = do_search(&conn, "findable").expect("search before");
+        assert_eq!(hits_before.len(), 1);
+
+        do_remove_message(&conn, "a", "e1").expect("remove");
+
+        let hits_after = do_search(&conn, "findable").expect("search after");
+        assert!(hits_after.is_empty(), "FTS should not find deleted message");
+    }
+
+    #[test]
+    fn search_prefix_matching() {
+        let conn = setup_conn();
+        do_save_folders(&conn, "a", &[sample_folder("mb1")]).expect("save folder");
+
+        do_save_messages(&conn, "a", "mb1", &[
+            sample_message("e1", "mb1", "Invoice from Acme Corp"),
+        ]).expect("save");
+
+        // Short prefix (< 3 chars) should not get wildcard expansion
+        let _hits_short = do_search(&conn, "in").expect("search short");
+        // FTS5 behavior: "in" won't match "Invoice" without wildcard
+        // This is expected — short tokens are kept as-is
+
+        // 3+ char prefix should match via wildcard expansion
+        let hits_prefix = do_search(&conn, "inv").expect("search prefix");
+        assert_eq!(hits_prefix.len(), 1, "prefix 'inv' should match 'Invoice'");
+
+        let hits_full = do_search(&conn, "invoice").expect("search full");
+        assert_eq!(hits_full.len(), 1);
+    }
+
+    // -- Thread loading tests --
+
+    #[test]
+    fn load_thread_returns_sorted_by_timestamp() {
+        let conn = setup_conn();
+        do_save_folders(&conn, "a", &[sample_folder("mb1")]).expect("save folder");
+
+        let mut m1 = sample_message("e1", "mb1", "first");
+        m1.thread_id = Some("t1".into());
+        m1.timestamp = 300;
+
+        let mut m2 = sample_message("e2", "mb1", "second");
+        m2.thread_id = Some("t1".into());
+        m2.timestamp = 100;
+
+        let mut m3 = sample_message("e3", "mb1", "third");
+        m3.thread_id = Some("t1".into());
+        m3.timestamp = 200;
+
+        do_save_messages(&conn, "a", "mb1", &[m1, m2, m3]).expect("save");
+
+        let thread = do_load_thread(&conn, "a", "t1", &["mb1".into()]).expect("load thread");
+        assert_eq!(thread.len(), 3);
+        assert_eq!(thread[0].email_id, "e2", "earliest first");
+        assert_eq!(thread[1].email_id, "e3");
+        assert_eq!(thread[2].email_id, "e1", "latest last");
+    }
+
+    #[test]
+    fn load_thread_filters_by_mailbox_ids() {
+        let conn = setup_conn();
+        do_save_folders(&conn, "a", &[
+            sample_folder_named("mb1", "INBOX"),
+            sample_folder_named("mb2", "Sent"),
+        ]).expect("save folders");
+
+        let mut m1 = sample_message("e1", "mb1", "inbox msg");
+        m1.thread_id = Some("t1".into());
+
+        let mut m2 = sample_message("e2", "mb2", "sent msg");
+        m2.thread_id = Some("t1".into());
+
+        do_save_messages(&conn, "a", "mb1", &[m1]).expect("save mb1");
+        do_save_messages(&conn, "a", "mb2", &[m2]).expect("save mb2");
+
+        // Only request mb1
+        let thread = do_load_thread(&conn, "a", "t1", &["mb1".into()]).expect("load thread");
+        assert_eq!(thread.len(), 1);
+        assert_eq!(thread[0].email_id, "e1");
+
+        // Request both
+        let thread_both = do_load_thread(&conn, "a", "t1", &["mb1".into(), "mb2".into()])
+            .expect("load thread both");
+        assert_eq!(thread_both.len(), 2);
     }
 }

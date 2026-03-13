@@ -241,4 +241,86 @@ mod tests {
         assert_eq!(a_folders[0].unread_count, 1);
         assert_eq!(b_folders[0].unread_count, 9);
     }
+
+    #[test]
+    fn state_get_set_round_trip() {
+        let conn = setup_conn();
+
+        // No prior state → None
+        let none = do_get_state(&conn, "a", "Mailbox").expect("get empty");
+        assert!(none.is_none());
+
+        // Set and get
+        do_set_state(&conn, "a", "Mailbox", "s42").expect("set");
+        let some = do_get_state(&conn, "a", "Mailbox").expect("get");
+        assert_eq!(some.as_deref(), Some("s42"));
+
+        // Overwrite
+        do_set_state(&conn, "a", "Mailbox", "s99").expect("set again");
+        let updated = do_get_state(&conn, "a", "Mailbox").expect("get updated");
+        assert_eq!(updated.as_deref(), Some("s99"));
+
+        // Different resource is independent
+        let other = do_get_state(&conn, "a", "Email:mb1").expect("get other");
+        assert!(other.is_none());
+
+        // Different account is independent
+        let other_acct = do_get_state(&conn, "b", "Mailbox").expect("get other account");
+        assert!(other_acct.is_none());
+    }
+
+    #[test]
+    fn load_folders_sorts_inbox_first_then_by_sort_order_then_alpha() {
+        let conn = setup_conn();
+
+        do_save_folders(&conn, "a", &[
+            Folder {
+                name: "Zeta".into(),
+                path: "Zeta".into(),
+                mailbox_id: "mb3".into(),
+                role: None,
+                sort_order: 5,
+                unread_count: 0,
+                total_count: 0,
+            },
+            Folder {
+                name: "Alpha".into(),
+                path: "Alpha".into(),
+                mailbox_id: "mb2".into(),
+                role: None,
+                sort_order: 5,
+                unread_count: 0,
+                total_count: 0,
+            },
+            Folder {
+                name: "Drafts".into(),
+                path: "Drafts".into(),
+                mailbox_id: "mb4".into(),
+                role: Some("drafts".into()),
+                sort_order: 3,
+                unread_count: 0,
+                total_count: 0,
+            },
+            Folder {
+                name: "Inbox".into(),
+                path: "Inbox".into(),
+                mailbox_id: "mb1".into(),
+                role: Some("inbox".into()),
+                sort_order: 10,
+                unread_count: 0,
+                total_count: 0,
+            },
+        ]).expect("save folders");
+
+        let folders = do_load_folders(&conn, "a").expect("load");
+        let names: Vec<&str> = folders.iter().map(|f| f.name.as_str()).collect();
+
+        // Inbox always first regardless of sort_order
+        assert_eq!(names[0], "Inbox");
+        // Then by sort_order: Drafts (3) before Alpha/Zeta (5)
+        assert_eq!(names[1], "Drafts");
+        // Same sort_order: alphabetical by path
+        assert_eq!(names[2], "Alpha");
+        assert_eq!(names[3], "Zeta");
+    }
 }

@@ -3,7 +3,8 @@
     "allow": [
       "Bash(cargo metadata:*)",
       "Bash(cargo test:*)",
-      "Bash(cargo:*)"
+      "Bash(cargo:*)",
+      "Read(//home/mental/projects/neverlight-forge-env/neverlight-mail/**)"
     ]
   }
 }

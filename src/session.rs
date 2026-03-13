@@ -59,10 +59,11 @@ impl JmapSession {
 
                 // Refresh to get a new access token
                 log::info!("Refreshing OAuth token for account {}", config.id);
-                let token_set = crate::oauth::refresh_access_token(
+                let token_set = neverlight_mail_oauth::refresh_access_token(
                     token_endpoint,
                     client_id,
                     &fresh_refresh_token,
+                    "urn:ietf:params:oauth:scope:mail",
                     resource,
                 )
                 .await

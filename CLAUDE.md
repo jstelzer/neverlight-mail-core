@@ -1,6 +1,6 @@
 # Claude Context: neverlight-mail-core
 
-**Last Updated:** 2026-03-07
+**Last Updated:** 2026-03-13
 
 ## What This Is
 
@@ -13,7 +13,8 @@ Target provider: Fastmail.
 ## Read First
 
 - `docs/code-conventions.md` — Code style, state modeling, error handling. **Follow this.**
-- `docs/jmap.md` — Full architecture, implementation phases, design rationale for the JMAP pivot.
+- `docs/plan.md` — Phased build plan with status. What's done, what's next.
+- `docs/cache.md` — Cache layer design: tables, dual-truth flags, sync interaction, invariants, test coverage.
 
 When in doubt about Rust idioms, the Rust Book is canon:
 https://doc.rust-lang.org/book/
@@ -26,7 +27,8 @@ neverlight-mail-core/
 ├── CLAUDE.md               — This file
 ├── docs/
 │   ├── code-conventions.md — Code style and patterns
-│   └── jmap.md             — JMAP architecture and implementation plan
+│   ├── plan.md             — Phased build plan with status
+│   └── cache.md            — Cache layer design and invariants
 ├── src/
 │   ├── lib.rs              — pub mod declarations + type re-exports
 │   ├── types.rs            — Owned types: EmailId, MailboxId, Flags, SyncEvent, etc.
@@ -74,10 +76,7 @@ This crate must never depend on `libcosmic`, `iced`, or any GUI framework.
 
 ### CacheHandle pattern
 
-- `CacheHandle` is a `Clone + Send + Sync` async facade over a dedicated background thread
-- All SQLite access happens on one thread via `mpsc::UnboundedSender<CacheCmd>`
-- Each command carries a `oneshot::Sender` for the reply
-- This avoids `rusqlite::Connection` Send/Sync issues entirely
+See `docs/cache.md` for the full design. Summary: `CacheHandle` is a `Clone + Send + Sync` async facade over a dedicated background thread. All SQLite access on one thread, commands via mpsc, replies via oneshot.
 
 ### Config resolution order
 
@@ -85,23 +84,6 @@ This crate must never depend on `libcosmic`, `iced`, or any GUI framework.
 1. Environment variables (`NEVERLIGHT_MAIL_SERVER`, etc.) → single env account
 2. Config file (`~/.config/neverlight-mail/config.json`) → multi-account with keyring
 3. Returns `Err(ConfigNeedsInput)` if UI input is needed
-
-## Dependencies
-
-| Crate            | Purpose                                                    |
-|------------------|------------------------------------------------------------|
-| reqwest          | JMAP HTTP transport (API calls, SSE, blob upload/download) |
-| mail-parser      | RFC 5322 parsing (body extraction, MIME)                   |
-| rusqlite         | SQLite cache (bundled)                                     |
-| html-safe-md     | Privacy-safe HTML → markdown/plaintext                     |
-| keyring          | OS credential storage                                      |
-| tokio            | Async runtime                                              |
-| serde/serde_json | JMAP request/response serialization                        |
-| thiserror        | Error type derivation                                      |
-| dirs             | XDG directory resolution                                   |
-| open             | Open URLs in system browser                                |
-| uuid             | Account ID generation                                      |
-| log              | Logging                                                    |
 
 ## Testing
 
