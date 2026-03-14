@@ -77,15 +77,17 @@ impl JmapSession {
                 .map_err(|e| format!("OAuth token refresh failed: {e}"))?;
 
                 // Persist new refresh token (servers use ratcheting — old token is invalidated)
-                if let Err(e) = crate::keyring::set_oauth_refresh(&config.id, &token_set.refresh_token) {
-                    log::warn!("Failed to persist refreshed OAuth token to keyring: {e}");
-                    // Also update plaintext fallback in config file
-                    if let Ok(Some(mut multi)) = crate::config::MultiAccountFileConfig::load() {
-                        if let Some(fac) = multi.accounts.iter_mut().find(|a| a.id == config.id) {
-                            if let crate::config::AuthBackend::OAuth { refresh_token_plaintext, .. } = &mut fac.auth {
-                                *refresh_token_plaintext = Some(token_set.refresh_token.clone());
+                if let Some(ref new_refresh) = token_set.refresh_token {
+                    if let Err(e) = crate::keyring::set_oauth_refresh(&config.id, new_refresh) {
+                        log::warn!("Failed to persist refreshed OAuth token to keyring: {e}");
+                        // Also update plaintext fallback in config file
+                        if let Ok(Some(mut multi)) = crate::config::MultiAccountFileConfig::load() {
+                            if let Some(fac) = multi.accounts.iter_mut().find(|a| a.id == config.id) {
+                                if let crate::config::AuthBackend::OAuth { refresh_token_plaintext, .. } = &mut fac.auth {
+                                    *refresh_token_plaintext = Some(new_refresh.clone());
+                                }
+                                let _ = multi.save();
                             }
-                            let _ = multi.save();
                         }
                     }
                 }

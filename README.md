@@ -2,7 +2,7 @@
 
 JMAP-native headless email engine for [Neverlight Mail](https://github.com/jstelzer/neverlight-mail). Implements RFC 8620 (JMAP Core) and RFC 8621 (JMAP Mail) directly — no IMAP, no SMTP, no melib.
 
-Zero GUI dependencies. Built on [reqwest](https://crates.io/crates/reqwest) for HTTP transport, [mail-parser](https://crates.io/crates/mail-parser) for RFC 5322 parsing, and [rusqlite](https://crates.io/crates/rusqlite) for local caching.
+Zero GUI dependencies. Built on [reqwest](https://crates.io/crates/reqwest) for HTTP transport, [mail-parser](https://crates.io/crates/mail-parser) for RFC 5322 parsing, [rusqlite](https://crates.io/crates/rusqlite) for local caching, and [html-safe-md](../html-safe-md) for privacy-safe HTML rendering. OAuth 2.0 is provided by [neverlight-mail-oauth](https://github.com/jstelzer/neverlight-mail-oauth).
 
 ## Usage
 
@@ -17,18 +17,19 @@ neverlight-mail-core = "0.1.0"
 |-------------|------------------------------------------------------------------|
 | `client`    | `JmapClient` — HTTP transport, request batching, blob ops       |
 | `session`   | Session discovery, capability negotiation                        |
-| `email`     | Email/query, Email/get, Email/set, Email/changes                |
+| `email`     | Email/query, Email/get, Email/set, body fetch, flag ops         |
 | `mailbox`   | Mailbox/get, Mailbox/changes, Mailbox/set                       |
 | `submit`    | EmailSubmission/set (sending via JMAP, replaces SMTP)            |
 | `sync`      | Delta sync loop via Email/changes + Mailbox/changes              |
+| `backfill`  | Background backfill of older messages into cache                 |
 | `push`      | EventSource SSE notifications (RFC 8620 §7.3)                   |
 | `parse`     | RFC 5322 body extraction via mail-parser                         |
 | `mime`      | Body rendering (plaintext, markdown), link opening               |
 | `config`    | Multi-account config resolution (env vars, config file, keyring) |
 | `discovery` | `.well-known/jmap` probe (RFC 8620 §2.2)                        |
-| `oauth`     | OAuth 2.0 with PKCE (RFC 9728 discovery, dynamic registration)  |
 | `keyring`   | OS credential storage (app passwords + OAuth refresh tokens)     |
 | `models`    | `Folder`, `MessageSummary`, `AttachmentData`                     |
+| `types`     | `EmailId`, `MailboxId`, `Flags`, `FlagOp`, `State`, `SyncEvent` |
 | `setup`     | UI-agnostic account setup state machine                          |
 | `store`     | SQLite cache with async facade, FTS5 search, flag tracking       |
 
