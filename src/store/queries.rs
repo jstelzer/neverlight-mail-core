@@ -94,7 +94,7 @@ pub(super) fn do_save_messages(
                  recipient = excluded.recipient,
                  -- Only update flags when no pending op is in flight
                  flags_server = CASE WHEN messages.pending_op IS NOT NULL
-                     THEN excluded.flags_server ELSE excluded.flags_server END,
+                     THEN messages.flags_server ELSE excluded.flags_server END,
                  flags_local = CASE WHEN messages.pending_op IS NOT NULL
                      THEN messages.flags_local ELSE excluded.flags_local END,
                  is_read = CASE WHEN messages.pending_op IS NOT NULL
