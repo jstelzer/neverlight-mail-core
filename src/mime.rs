@@ -2,7 +2,7 @@
 ///
 /// Prefers text/plain when available; falls back to sanitized HTML conversion.
 pub fn render_body(text_plain: Option<&str>, text_html: Option<&str>) -> String {
-    html_safe_md::render_email_plain(text_plain, text_html)
+    neverlight_mail_html_safe_md::render_email_plain(text_plain, text_html)
 }
 
 /// Render email body as Markdown for the preview widget.
@@ -12,7 +12,7 @@ pub fn render_body(text_plain: Option<&str>, text_html: Option<&str>) -> String 
 /// HTML → markdown pipeline when plain text is missing or looks like a tracking
 /// stub.
 pub fn render_body_markdown(text_plain: Option<&str>, text_html: Option<&str>) -> String {
-    html_safe_md::render_email(text_plain, text_html)
+    neverlight_mail_html_safe_md::render_email(text_plain, text_html)
 }
 
 /// Open a URL in the system browser.
@@ -149,7 +149,7 @@ mod tests {
 
     #[test]
     fn invoice_plain_text_not_flagged_as_junk() {
-        assert!(!html_safe_md::is_junk_plain(FIXTURE_PLAIN));
+        assert!(!neverlight_mail_html_safe_md::is_junk_plain(FIXTURE_PLAIN));
     }
 
     #[test]

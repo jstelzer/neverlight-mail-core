@@ -450,7 +450,7 @@ async fn sync_emails_head_then_delta() {
     assert!(!messages.is_empty(), "inbox should have messages");
     eprintln!("Email sync: {} messages on first sync", messages.len());
 
-    let resource = format!("Email:{inbox_id}");
+    let resource = "Email".to_string();
     let state = cache
         .get_state(client.account_id.clone(), resource.clone())
         .await

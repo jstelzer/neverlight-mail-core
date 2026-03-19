@@ -2,7 +2,7 @@
 
 JMAP-native headless email engine for [Neverlight Mail](https://github.com/jstelzer/neverlight-mail). Implements RFC 8620 (JMAP Core) and RFC 8621 (JMAP Mail) directly — no IMAP, no SMTP, no melib.
 
-Zero GUI dependencies. Built on [reqwest](https://crates.io/crates/reqwest) for HTTP transport, [mail-parser](https://crates.io/crates/mail-parser) for RFC 5322 parsing, [rusqlite](https://crates.io/crates/rusqlite) for local caching, and [html-safe-md](../html-safe-md) for privacy-safe HTML rendering. OAuth 2.0 is provided by [neverlight-mail-oauth](https://github.com/jstelzer/neverlight-mail-oauth).
+Zero GUI dependencies. Built on [reqwest](https://crates.io/crates/reqwest) for HTTP transport, [mail-parser](https://crates.io/crates/mail-parser) for RFC 5322 parsing, [rusqlite](https://crates.io/crates/rusqlite) for local caching, and [neverlight-mail-html-safe-md](../neverlight-mail-html-safe-md) for privacy-safe HTML rendering. OAuth 2.0 is provided by [neverlight-mail-oauth](https://github.com/jstelzer/neverlight-mail-oauth).
 
 ## Usage
 

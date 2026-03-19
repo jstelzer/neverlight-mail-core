@@ -6,7 +6,12 @@
       "Bash(cargo:*)",
       "Read(//home/mental/projects/neverlight-forge-env/neverlight-mail/**)",
       "Bash(NEVERLIGHT_MAIL_JMAP_TOKEN=\"fmu1-4c264053-21ae732bbbe51e53ca3cbc952e42b718-0-05275317a9e55d869b1ade24468d2bcd\" NEVERLIGHT_MAIL_USER=\"jstelzer@fastmail.com\" cargo test --test jmap_integration fastmail_advertises_push_and_submission -- --nocapture 2>&1)",
-      "Bash(find /home/mental/projects/neverlight-forge-env/neverlight-mail-tui/src -name \"*.rs\" -type f 2>/dev/null | head -20)"
+      "Bash(find /home/mental/projects/neverlight-forge-env/neverlight-mail-tui/src -name \"*.rs\" -type f 2>/dev/null | head -20)",
+      "Bash(grep -n \"waitForChanges\\\\|wait_for_changes\" /home/mental/projects/neverlight-forge-env/neverlight-mail-macos/NeverlightMail/NeverlightMail/*.swift)",
+      "Bash(grep -n \"reply_to\\\\|replyTo\" /home/mental/projects/neverlight-forge-env/neverlight-mail-macos/NeverlightMail/NeverlightMail/*.swift | head -20)",
+      "Bash(grep -n \"RustVec\" /home/mental/projects/neverlight-forge-env/neverlight-mail-macos/NeverlightMail/NeverlightMail/*.swift)",
+      "Bash(CARGO_LOG=cargo::core::source=trace cargo check 2>&1 | head -30)",
+      "Bash(CARGO_LOG=cargo::core=debug cargo check 2>&1 | grep -i 'html-safe' | head -20)"
     ]
   }
 }
