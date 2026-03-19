@@ -4,15 +4,12 @@ use rusqlite::Connection;
 
 use crate::models::Folder;
 
-pub(super) fn do_save_folders(
-    conn: &Connection,
+/// Inner save-folders logic that operates on an existing transaction.
+fn save_folders_in_tx(
+    tx: &rusqlite::Transaction<'_>,
     account_id: &str,
     folders: &[Folder],
 ) -> Result<(), String> {
-    let tx = conn
-        .unchecked_transaction()
-        .map_err(|e| format!("Cache tx error: {e}"))?;
-
     let mut stmt = tx
         .prepare(
             "INSERT INTO folders (account_id, path, name, mailbox_id, role, sort_order, unread_count, total_count)
@@ -104,9 +101,174 @@ pub(super) fn do_save_folders(
         tx.execute(&sql, param_refs.as_slice())
             .map_err(|e| format!("Cache delete error: {e}"))?;
     }
+    Ok(())
+}
+
+pub(super) fn do_save_folders(
+    conn: &Connection,
+    account_id: &str,
+    folders: &[Folder],
+) -> Result<(), String> {
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| format!("Cache tx error: {e}"))?;
+    save_folders_in_tx(&tx, account_id, folders)?;
+    tx.commit()
+        .map_err(|e| format!("Cache commit error: {e}"))?;
+    Ok(())
+}
+
+/// Atomic: save folders + set sync state in one transaction.
+pub(super) fn do_save_folders_and_set_state(
+    conn: &Connection,
+    account_id: &str,
+    folders: &[Folder],
+    resource: &str,
+    state: &str,
+) -> Result<(), String> {
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| format!("Cache tx error: {e}"))?;
+    save_folders_in_tx(&tx, account_id, folders)?;
+    set_state_in_tx(&tx, account_id, resource, state)?;
+    tx.commit()
+        .map_err(|e| format!("Cache commit error: {e}"))?;
+    Ok(())
+}
+
+/// Atomic: upsert + remove folders + set sync state in one transaction.
+pub(super) fn do_delta_folders_and_set_state(
+    conn: &Connection,
+    account_id: &str,
+    upsert: &[Folder],
+    remove_ids: &[String],
+    resource: &str,
+    state: &str,
+) -> Result<(), String> {
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| format!("Cache tx error: {e}"))?;
+
+    // Upsert folders
+    upsert_folders_in_tx(&tx, account_id, upsert)?;
+
+    // Remove destroyed folders (cascade to messages + attachments)
+    if !remove_ids.is_empty() {
+        remove_folders_in_tx(&tx, account_id, remove_ids)?;
+    }
+
+    // Set state
+    set_state_in_tx(&tx, account_id, resource, state)?;
 
     tx.commit()
         .map_err(|e| format!("Cache commit error: {e}"))?;
+    Ok(())
+}
+
+/// Set sync state within an existing transaction.
+fn set_state_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    account_id: &str,
+    resource: &str,
+    state: &str,
+) -> Result<(), String> {
+    tx.execute(
+        "INSERT INTO sync_state (account_id, resource, state) VALUES (?1, ?2, ?3)
+         ON CONFLICT(account_id, resource) DO UPDATE SET state = excluded.state",
+        rusqlite::params![account_id, resource, state],
+    )
+    .map_err(|e| format!("set_state error: {e}"))?;
+    Ok(())
+}
+
+/// Upsert folders within an existing transaction (no prune).
+fn upsert_folders_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    account_id: &str,
+    folders: &[Folder],
+) -> Result<(), String> {
+    let mut stmt = tx
+        .prepare(
+            "INSERT INTO folders (account_id, path, name, mailbox_id, role, sort_order, unread_count, total_count)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(account_id, path) DO UPDATE SET
+                 name = excluded.name,
+                 mailbox_id = excluded.mailbox_id,
+                 role = excluded.role,
+                 sort_order = excluded.sort_order,
+                 unread_count = excluded.unread_count,
+                 total_count = excluded.total_count",
+        )
+        .map_err(|e| format!("Cache prepare error: {e}"))?;
+
+    for f in folders {
+        stmt.execute(rusqlite::params![
+            account_id,
+            f.path,
+            f.name,
+            f.mailbox_id,
+            f.role,
+            f.sort_order,
+            f.unread_count,
+            f.total_count,
+        ])
+        .map_err(|e| format!("Cache upsert error: {e}"))?;
+    }
+    drop(stmt);
+    Ok(())
+}
+
+/// Remove folders by ID within an existing transaction (cascade).
+fn remove_folders_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    account_id: &str,
+    mailbox_ids: &[String],
+) -> Result<(), String> {
+    if mailbox_ids.is_empty() {
+        return Ok(());
+    }
+
+    let placeholders: String = (0..mailbox_ids.len())
+        .map(|i| format!("?{}", i + 2))
+        .collect::<Vec<_>>()
+        .join(",");
+
+    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    params.push(Box::new(account_id.to_string()));
+    for id in mailbox_ids {
+        params.push(Box::new(id.clone()));
+    }
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+        params.iter().map(|p| p.as_ref()).collect();
+
+    // Cascade: junction rows → orphaned messages/attachments → folders
+    let sql = format!(
+        "DELETE FROM message_mailboxes WHERE account_id = ?1 AND mailbox_id IN ({placeholders})"
+    );
+    tx.execute(&sql, param_refs.as_slice())
+        .map_err(|e| format!("Cache junction cascade error: {e}"))?;
+
+    tx.execute(
+        "DELETE FROM attachments WHERE account_id = ?1 AND email_id NOT IN (
+            SELECT email_id FROM message_mailboxes WHERE account_id = ?1
+        )",
+        [account_id],
+    )
+    .map_err(|e| format!("Cache cascade error: {e}"))?;
+    tx.execute(
+        "DELETE FROM messages WHERE account_id = ?1 AND email_id NOT IN (
+            SELECT email_id FROM message_mailboxes WHERE account_id = ?1
+        )",
+        [account_id],
+    )
+    .map_err(|e| format!("Cache cascade error: {e}"))?;
+
+    let sql = format!(
+        "DELETE FROM folders WHERE account_id = ?1 AND mailbox_id IN ({placeholders})"
+    );
+    tx.execute(&sql, param_refs.as_slice())
+        .map_err(|e| format!("Cache delete error: {e}"))?;
+
     Ok(())
 }
 

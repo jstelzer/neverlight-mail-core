@@ -53,6 +53,8 @@ pub enum JmapError {
     CannotCalculateChanges,
     #[error("JMAP request error: {0}")]
     RequestError(String),
+    #[error("Cache error: {0}")]
+    CacheError(String),
 }
 
 /// JMAP HTTP client. Holds session URLs and sends batched requests.

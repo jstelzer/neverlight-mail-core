@@ -126,4 +126,46 @@ pub(super) enum CacheCmd {
         mailbox_id: String,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// Atomic: save folders + set sync state in one transaction.
+    SaveFoldersAndSetState {
+        account_id: String,
+        folders: Vec<Folder>,
+        resource: String,
+        state: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Atomic: upsert + remove folders + set sync state in one transaction.
+    DeltaFoldersAndSetState {
+        account_id: String,
+        upsert: Vec<Folder>,
+        remove_ids: Vec<String>,
+        resource: String,
+        state: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Atomic: save messages + set sync state + mark mailbox populated.
+    SaveMessagesAndSetState {
+        account_id: String,
+        mailbox_id: String,
+        messages: Vec<MessageSummary>,
+        resource: String,
+        state: String,
+        populated_mailbox_id: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Atomic: remove destroyed + save created/updated + set state in one tx.
+    DeltaEmailBatch {
+        account_id: String,
+        remove_ids: Vec<String>,
+        save_groups: Vec<(String, Vec<MessageSummary>)>,
+        resource: String,
+        state: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Expire pending ops older than max_age_secs by reverting to server flags.
+    ExpirePendingOps {
+        account_id: String,
+        max_age_secs: i64,
+        reply: oneshot::Sender<Result<u64, String>>,
+    },
 }

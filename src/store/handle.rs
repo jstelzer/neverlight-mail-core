@@ -408,6 +408,115 @@ impl CacheHandle {
         rx.await.map_err(|_| "Cache unavailable".to_string())?
     }
 
+    /// Atomic: save folders + set sync state in one transaction.
+    pub async fn save_folders_and_set_state(
+        &self,
+        account_id: String,
+        folders: Vec<Folder>,
+        resource: String,
+        state: String,
+    ) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(CacheCmd::SaveFoldersAndSetState {
+                account_id,
+                folders,
+                resource,
+                state,
+                reply,
+            })
+            .map_err(|_| "Cache unavailable".to_string())?;
+        rx.await.map_err(|_| "Cache unavailable".to_string())?
+    }
+
+    /// Atomic: upsert + remove folders + set sync state.
+    pub async fn delta_folders_and_set_state(
+        &self,
+        account_id: String,
+        upsert: Vec<Folder>,
+        remove_ids: Vec<String>,
+        resource: String,
+        state: String,
+    ) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(CacheCmd::DeltaFoldersAndSetState {
+                account_id,
+                upsert,
+                remove_ids,
+                resource,
+                state,
+                reply,
+            })
+            .map_err(|_| "Cache unavailable".to_string())?;
+        rx.await.map_err(|_| "Cache unavailable".to_string())?
+    }
+
+    /// Atomic: save messages + set sync state + mark mailbox as populated.
+    pub async fn save_messages_and_set_state(
+        &self,
+        account_id: String,
+        mailbox_id: String,
+        messages: Vec<MessageSummary>,
+        resource: String,
+        state: String,
+        populated_mailbox_id: String,
+    ) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(CacheCmd::SaveMessagesAndSetState {
+                account_id,
+                mailbox_id,
+                messages,
+                resource,
+                state,
+                populated_mailbox_id,
+                reply,
+            })
+            .map_err(|_| "Cache unavailable".to_string())?;
+        rx.await.map_err(|_| "Cache unavailable".to_string())?
+    }
+
+    /// Atomic: remove destroyed + save created/updated + set state.
+    pub async fn delta_email_batch(
+        &self,
+        account_id: String,
+        remove_ids: Vec<String>,
+        save_groups: Vec<(String, Vec<MessageSummary>)>,
+        resource: String,
+        state: String,
+    ) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(CacheCmd::DeltaEmailBatch {
+                account_id,
+                remove_ids,
+                save_groups,
+                resource,
+                state,
+                reply,
+            })
+            .map_err(|_| "Cache unavailable".to_string())?;
+        rx.await.map_err(|_| "Cache unavailable".to_string())?
+    }
+
+    /// Expire pending ops older than `max_age_secs`.
+    pub async fn expire_pending_ops(
+        &self,
+        account_id: String,
+        max_age_secs: i64,
+    ) -> Result<u64, String> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(CacheCmd::ExpirePendingOps {
+                account_id,
+                max_age_secs,
+                reply,
+            })
+            .map_err(|_| "Cache unavailable".to_string())?;
+        rx.await.map_err(|_| "Cache unavailable".to_string())?
+    }
+
     pub async fn search(
         &self,
         account_id: String,
@@ -638,6 +747,63 @@ fn run_loop(conn: Connection, mut rx: mpsc::UnboundedReceiver<CacheCmd>) {
                 reply,
             } => {
                 let _ = reply.send(queries::do_reset_backfill_progress(&conn, &account_id, &mailbox_id));
+            }
+            CacheCmd::SaveFoldersAndSetState {
+                account_id,
+                folders,
+                resource,
+                state,
+                reply,
+            } => {
+                let _ = reply.send(folder_queries::do_save_folders_and_set_state(
+                    &conn, &account_id, &folders, &resource, &state,
+                ));
+            }
+            CacheCmd::DeltaFoldersAndSetState {
+                account_id,
+                upsert,
+                remove_ids,
+                resource,
+                state,
+                reply,
+            } => {
+                let _ = reply.send(folder_queries::do_delta_folders_and_set_state(
+                    &conn, &account_id, &upsert, &remove_ids, &resource, &state,
+                ));
+            }
+            CacheCmd::SaveMessagesAndSetState {
+                account_id,
+                mailbox_id,
+                messages,
+                resource,
+                state,
+                populated_mailbox_id,
+                reply,
+            } => {
+                let _ = reply.send(queries::do_save_messages_and_set_state(
+                    &conn, &account_id, &mailbox_id, &messages, &resource, &state, &populated_mailbox_id,
+                ));
+            }
+            CacheCmd::DeltaEmailBatch {
+                account_id,
+                remove_ids,
+                save_groups,
+                resource,
+                state,
+                reply,
+            } => {
+                let _ = reply.send(queries::do_delta_email_batch(
+                    &conn, &account_id, &remove_ids, &save_groups, &resource, &state,
+                ));
+            }
+            CacheCmd::ExpirePendingOps {
+                account_id,
+                max_age_secs,
+                reply,
+            } => {
+                let _ = reply.send(queries::do_expire_pending_ops(
+                    &conn, &account_id, max_age_secs,
+                ));
             }
         }
     }

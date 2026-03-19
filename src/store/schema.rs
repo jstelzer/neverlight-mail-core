@@ -142,6 +142,9 @@ pub(super) fn run_migrations(conn: &Connection) {
 
     // Backfill progress tracking for background history walking.
     migrate_backfill_progress(conn);
+
+    // Pending-op expiry timestamp column.
+    migrate_pending_op_at(conn);
 }
 
 /// One-shot migration: NULL out cached body columns to force re-rendering.
@@ -266,6 +269,34 @@ fn migrate_backfill_progress(conn: &Connection) {
         )"
     ) {
         log::warn!("backfill_progress migration failed: {}", e);
+    }
+}
+
+/// Add `pending_op_at` column to messages for pending-op expiry.
+///
+/// When a pending_op is set, `pending_op_at` records the unix timestamp.
+/// Ops older than a threshold are auto-reverted to prevent stuck state.
+fn migrate_pending_op_at(conn: &Connection) {
+    let already_done: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='_pending_op_at_v1')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+
+    if already_done {
+        return;
+    }
+
+    log::info!("Adding pending_op_at column to messages");
+    if let Err(e) = conn.execute_batch(
+        "ALTER TABLE messages ADD COLUMN pending_op_at INTEGER;
+         UPDATE messages SET pending_op_at = strftime('%s', 'now') WHERE pending_op IS NOT NULL;
+         CREATE TABLE IF NOT EXISTS _pending_op_at_v1 (migrated INTEGER DEFAULT 1);
+         INSERT INTO _pending_op_at_v1 VALUES (1);"
+    ) {
+        log::warn!("pending_op_at migration failed: {}", e);
     }
 }
 

@@ -58,16 +58,14 @@ fn row_to_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<MessageSummary> {
     })
 }
 
-pub(super) fn do_save_messages(
-    conn: &Connection,
+/// Inner save-messages logic that operates on an existing transaction.
+/// Used by both `do_save_messages` (standalone) and `do_save_messages_and_set_state` (combined).
+fn save_messages_in_tx(
+    tx: &rusqlite::Transaction<'_>,
     account_id: &str,
     mailbox_id: &str,
     messages: &[MessageSummary],
 ) -> Result<(), String> {
-    let tx = conn
-        .unchecked_transaction()
-        .map_err(|e| format!("Cache tx error: {e}"))?;
-
     // Upsert: insert new messages or update existing ones.
     // Messages with a pending_op get server-side fields updated but keep their
     // local flags and pending_op intact. All other messages get a full upsert
@@ -162,9 +160,132 @@ pub(super) fn do_save_messages(
     drop(upsert_stmt);
     drop(delete_mbox_stmt);
     drop(insert_mbox_stmt);
+    Ok(())
+}
+
+pub(super) fn do_save_messages(
+    conn: &Connection,
+    account_id: &str,
+    mailbox_id: &str,
+    messages: &[MessageSummary],
+) -> Result<(), String> {
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| format!("Cache tx error: {e}"))?;
+    save_messages_in_tx(&tx, account_id, mailbox_id, messages)?;
+    tx.commit()
+        .map_err(|e| format!("Cache commit error: {e}"))?;
+    Ok(())
+}
+
+/// Atomic: save messages + set sync state + mark mailbox as populated.
+pub(super) fn do_save_messages_and_set_state(
+    conn: &Connection,
+    account_id: &str,
+    mailbox_id: &str,
+    messages: &[MessageSummary],
+    resource: &str,
+    state: &str,
+    populated_mailbox_id: &str,
+) -> Result<(), String> {
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| format!("Cache tx error: {e}"))?;
+    save_messages_in_tx(&tx, account_id, mailbox_id, messages)?;
+    set_state_in_tx(&tx, account_id, resource, state)?;
+    // Mark this mailbox as populated
+    let populated_key = format!("Populated:{populated_mailbox_id}");
+    set_state_in_tx(&tx, account_id, &populated_key, "1")?;
+    tx.commit()
+        .map_err(|e| format!("Cache commit error: {e}"))?;
+    Ok(())
+}
+
+/// Atomic: remove destroyed emails + save created/updated + set state.
+pub(super) fn do_delta_email_batch(
+    conn: &Connection,
+    account_id: &str,
+    remove_ids: &[String],
+    save_groups: &[(String, Vec<MessageSummary>)],
+    resource: &str,
+    state: &str,
+) -> Result<(), String> {
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| format!("Cache tx error: {e}"))?;
+
+    // Remove destroyed emails
+    for id in remove_ids {
+        tx.execute(
+            "DELETE FROM attachments WHERE account_id = ?1 AND email_id = ?2",
+            rusqlite::params![account_id, id],
+        )
+        .map_err(|e| format!("Cache attachment cascade error: {e}"))?;
+        tx.execute(
+            "DELETE FROM message_mailboxes WHERE account_id = ?1 AND email_id = ?2",
+            rusqlite::params![account_id, id],
+        )
+        .map_err(|e| format!("Cache junction cascade error: {e}"))?;
+        tx.execute(
+            "DELETE FROM messages WHERE account_id = ?1 AND email_id = ?2",
+            rusqlite::params![account_id, id],
+        )
+        .map_err(|e| format!("Cache remove_message error: {e}"))?;
+    }
+
+    // Save each group of messages
+    for (mailbox_id, messages) in save_groups {
+        save_messages_in_tx(&tx, account_id, mailbox_id, messages)?;
+    }
+
+    // Set state
+    set_state_in_tx(&tx, account_id, resource, state)?;
 
     tx.commit()
         .map_err(|e| format!("Cache commit error: {e}"))?;
+    Ok(())
+}
+
+/// Expire pending ops older than `max_age_secs` by reverting to server flags.
+pub(super) fn do_expire_pending_ops(
+    conn: &Connection,
+    account_id: &str,
+    max_age_secs: i64,
+) -> Result<u64, String> {
+    let affected = conn.execute(
+        "UPDATE messages SET
+            flags_local = flags_server,
+            pending_op = NULL,
+            pending_op_at = NULL,
+            is_read = CASE WHEN (flags_server & 1) != 0 THEN 1 ELSE 0 END,
+            is_starred = CASE WHEN (flags_server & 2) != 0 THEN 1 ELSE 0 END
+         WHERE account_id = ?1
+           AND pending_op IS NOT NULL
+           AND pending_op_at IS NOT NULL
+           AND pending_op_at < (strftime('%s', 'now') - ?2)",
+        rusqlite::params![account_id, max_age_secs],
+    )
+    .map_err(|e| format!("Cache expire_pending error: {e}"))?;
+
+    if affected > 0 {
+        log::info!("Expired {} stuck pending ops for {}", affected, account_id);
+    }
+    Ok(affected as u64)
+}
+
+/// Set sync state within an existing transaction.
+fn set_state_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    account_id: &str,
+    resource: &str,
+    state: &str,
+) -> Result<(), String> {
+    tx.execute(
+        "INSERT INTO sync_state (account_id, resource, state) VALUES (?1, ?2, ?3)
+         ON CONFLICT(account_id, resource) DO UPDATE SET state = excluded.state",
+        rusqlite::params![account_id, resource, state],
+    )
+    .map_err(|e| format!("set_state error: {e}"))?;
     Ok(())
 }
 
@@ -321,7 +442,8 @@ pub(super) fn do_update_flags(
 ) -> Result<(), String> {
     let (is_read, is_starred) = flags_from_u8(flags_local);
     conn.execute(
-        "UPDATE messages SET flags_local = ?1, pending_op = ?2, is_read = ?3, is_starred = ?4
+        "UPDATE messages SET flags_local = ?1, pending_op = ?2, is_read = ?3, is_starred = ?4,
+         pending_op_at = strftime('%s', 'now')
          WHERE account_id = ?5 AND email_id = ?6",
         rusqlite::params![
             flags_local as i32,
@@ -345,7 +467,7 @@ pub(super) fn do_clear_pending_op(
     let (is_read, is_starred) = flags_from_u8(flags_server);
     conn.execute(
         "UPDATE messages SET flags_server = ?1, flags_local = ?1, pending_op = NULL,
-         is_read = ?2, is_starred = ?3
+         pending_op_at = NULL, is_read = ?2, is_starred = ?3
          WHERE account_id = ?4 AND email_id = ?5",
         rusqlite::params![
             flags_server as i32,
@@ -366,6 +488,7 @@ pub(super) fn do_revert_pending_op(
 ) -> Result<(), String> {
     conn.execute(
         "UPDATE messages SET flags_local = flags_server, pending_op = NULL,
+         pending_op_at = NULL,
          is_read = CASE WHEN (flags_server & 1) != 0 THEN 1 ELSE 0 END,
          is_starred = CASE WHEN (flags_server & 2) != 0 THEN 1 ELSE 0 END
          WHERE account_id = ?1 AND email_id = ?2",
@@ -1355,5 +1478,159 @@ mod tests {
         let a_list = do_list_backfill_progress(&conn, "a").expect("list a");
         assert_eq!(a_list.len(), 1);
         assert_eq!(a_list[0].account_id, "a");
+    }
+
+    // -----------------------------------------------------------------------
+    // Atomic write + state tests (Phase 3)
+    // -----------------------------------------------------------------------
+
+    use super::{do_save_messages_and_set_state, do_delta_email_batch, do_expire_pending_ops};
+    use crate::store::folder_queries::do_get_state;
+
+    #[test]
+    fn save_messages_and_set_state_is_atomic() {
+        let conn = setup_conn();
+        do_save_folders(&conn, "a", &[sample_folder("mb1")]).expect("save folder");
+
+        let msg = sample_message("e1", "mb1", "atomic test");
+        do_save_messages_and_set_state(
+            &conn, "a", "mb1", &[msg], "Email", "s42", "mb1",
+        ).expect("atomic save");
+
+        // Both message and state should be present
+        let msgs = do_load_messages(&conn, "a", "mb1", 50, 0).expect("load");
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].subject, "atomic test");
+
+        let state = do_get_state(&conn, "a", "Email").expect("get state");
+        assert_eq!(state.as_deref(), Some("s42"));
+
+        // Populated flag should be set
+        let populated = do_get_state(&conn, "a", "Populated:mb1").expect("get populated");
+        assert!(populated.is_some(), "populated flag should be set after head sync");
+    }
+
+    #[test]
+    fn delta_email_batch_removes_and_saves_atomically() {
+        let conn = setup_conn();
+        do_save_folders(&conn, "a", &[sample_folder("mb1")]).expect("save folder");
+
+        // Insert two messages
+        do_save_messages(&conn, "a", "mb1", &[
+            sample_message("e1", "mb1", "msg 1"),
+            sample_message("e2", "mb1", "msg 2"),
+        ]).expect("save initial");
+
+        // Delta: remove e1, add e3, set state
+        let new_msg = sample_message("e3", "mb1", "msg 3");
+        do_delta_email_batch(
+            &conn, "a",
+            &["e1".to_string()],
+            &[("mb1".to_string(), vec![new_msg])],
+            "Email", "s99",
+        ).expect("delta batch");
+
+        let msgs = do_load_messages(&conn, "a", "mb1", 50, 0).expect("load");
+        let ids: Vec<&str> = msgs.iter().map(|m| m.email_id.as_str()).collect();
+        assert!(!ids.contains(&"e1"), "e1 should be removed");
+        assert!(ids.contains(&"e2"), "e2 should survive");
+        assert!(ids.contains(&"e3"), "e3 should be added");
+
+        let state = do_get_state(&conn, "a", "Email").expect("get state");
+        assert_eq!(state.as_deref(), Some("s99"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Pending-op expiry tests (Phase 4)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn expire_pending_ops_reverts_old_ops() {
+        let conn = setup_conn();
+        do_save_folders(&conn, "a", &[sample_folder("mb1")]).expect("save folder");
+
+        // Insert a message (unread)
+        do_save_messages(&conn, "a", "mb1", &[sample_message("e1", "mb1", "test")])
+            .expect("save");
+
+        // Simulate a pending op set 10 minutes ago
+        do_update_flags(&conn, "a", "e1", flags_to_u8(true, false), "mark_read")
+            .expect("update flags");
+        // Backdate the pending_op_at to 600 seconds ago
+        conn.execute(
+            "UPDATE messages SET pending_op_at = strftime('%s', 'now') - 600
+             WHERE account_id = 'a' AND email_id = 'e1'",
+            [],
+        ).expect("backdate");
+
+        // Expire ops older than 300 seconds
+        let expired = do_expire_pending_ops(&conn, "a", 300).expect("expire");
+        assert_eq!(expired, 1, "should expire 1 op");
+
+        // Message should be reverted to server flags (unread)
+        let msgs = do_load_messages(&conn, "a", "mb1", 50, 0).expect("load");
+        assert!(!msgs[0].is_read, "expired op should revert to server flags");
+    }
+
+    #[test]
+    fn expire_pending_ops_preserves_fresh_ops() {
+        let conn = setup_conn();
+        do_save_folders(&conn, "a", &[sample_folder("mb1")]).expect("save folder");
+
+        do_save_messages(&conn, "a", "mb1", &[sample_message("e1", "mb1", "test")])
+            .expect("save");
+
+        // Set a pending op (timestamp will be "now")
+        do_update_flags(&conn, "a", "e1", flags_to_u8(true, false), "mark_read")
+            .expect("update flags");
+
+        // Try to expire with 300s threshold — should not expire fresh ops
+        let expired = do_expire_pending_ops(&conn, "a", 300).expect("expire");
+        assert_eq!(expired, 0, "fresh ops should not be expired");
+
+        // Message should still show optimistic flags
+        let msgs = do_load_messages(&conn, "a", "mb1", 50, 0).expect("load");
+        assert!(msgs[0].is_read, "fresh pending op should still be active");
+    }
+
+    #[test]
+    fn update_flags_sets_pending_op_at() {
+        let conn = setup_conn();
+        do_save_folders(&conn, "a", &[sample_folder("mb1")]).expect("save folder");
+
+        do_save_messages(&conn, "a", "mb1", &[sample_message("e1", "mb1", "test")])
+            .expect("save");
+
+        do_update_flags(&conn, "a", "e1", flags_to_u8(true, false), "mark_read")
+            .expect("update flags");
+
+        // pending_op_at should be set
+        let op_at: Option<i64> = conn.query_row(
+            "SELECT pending_op_at FROM messages WHERE account_id = 'a' AND email_id = 'e1'",
+            [],
+            |row| row.get(0),
+        ).expect("query pending_op_at");
+        assert!(op_at.is_some(), "pending_op_at should be set after update_flags");
+    }
+
+    #[test]
+    fn clear_pending_op_clears_pending_op_at() {
+        let conn = setup_conn();
+        do_save_folders(&conn, "a", &[sample_folder("mb1")]).expect("save folder");
+
+        do_save_messages(&conn, "a", "mb1", &[sample_message("e1", "mb1", "test")])
+            .expect("save");
+
+        do_update_flags(&conn, "a", "e1", flags_to_u8(true, false), "mark_read")
+            .expect("update flags");
+        do_clear_pending_op(&conn, "a", "e1", flags_to_u8(true, false))
+            .expect("clear pending");
+
+        let op_at: Option<i64> = conn.query_row(
+            "SELECT pending_op_at FROM messages WHERE account_id = 'a' AND email_id = 'e1'",
+            [],
+            |row| row.get(0),
+        ).expect("query pending_op_at");
+        assert!(op_at.is_none(), "pending_op_at should be cleared after clear_pending_op");
     }
 }
