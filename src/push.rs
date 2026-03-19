@@ -117,8 +117,7 @@ pub async fn listen(
     log::info!("Connecting EventSource: {}", url);
 
     let auth = client.auth_header().await;
-    let http = reqwest::Client::new();
-    let mut resp = http
+    let mut resp = client.http
         .get(&url)
         .header("Accept", "text/event-stream")
         .header("Authorization", &auth)

@@ -63,7 +63,7 @@ pub enum JmapError {
 /// allowing transparent token refresh for OAuth accounts.
 #[derive(Debug, Clone)]
 pub struct JmapClient {
-    http: reqwest::Client,
+    pub(crate) http: reqwest::Client,
     auth: Arc<RwLock<String>>,
     pub api_url: String,
     pub upload_url: String,
