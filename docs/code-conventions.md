@@ -156,11 +156,20 @@ pub enum JmapError {
     #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),
 
-    #[error("JMAP method error: {method} ({error_type})")]
-    MethodError { method: String, error_type: String },
+    #[error("JMAP method error: {method} ({error_type}): {description}")]
+    MethodError { method: String, error_type: String, description: String },
 
-    #[error("full resync required")]
+    #[error("cannotCalculateChanges — full resync required")]
     CannotCalculateChanges,
+
+    #[error("Email not found on server: {0}")]
+    NotFound(String),
+
+    #[error("JMAP request error: {0}")]
+    RequestError(String),
+
+    #[error("Cache error: {0}")]
+    CacheError(String),
 }
 ```
 
@@ -189,12 +198,12 @@ Domain-specific naming:
 Each module has a single responsibility. Split by **direction of data flow**, not by domain noun:
 
 - `client.rs` — outward (HTTP transport, sending requests)
-- `session.rs` — inward (parsing server capabilities)
-- `email.rs` — JMAP Email methods (query, get, set, changes)
+- `session.rs` — inward (parsing server capabilities, shared capability detection)
+- `email/` — JMAP Email methods (query, get, body, flags, search)
 - `mailbox.rs` — JMAP Mailbox methods
 - `sync.rs` — orchestration (combines email + mailbox changes into a sync loop)
 - `parse.rs` — inward (RFC 5322 bytes → structured data)
-- `store/` — downward (cache persistence)
+- `store/` — downward (cache persistence, split by responsibility)
 - `models.rs` — shared data structures (protocol-neutral, used by UI)
 - `types.rs` — shared JMAP types (protocol-specific, used by engine internals)
 
@@ -316,12 +325,12 @@ The extracted function should be testable on its own. If it can't be tested with
 Tests are not optional. New logic gets tests. Changed logic gets updated tests. If a function is pure, it's trivially testable — that's the point.
 
 - Unit tests live in `#[cfg(test)] mod tests` at the bottom of each module.
-- Integration tests that need a real JMAP server live in `tests/` and gate on env vars (`NEVERLIGHT_MAIL_JMAP_TOKEN`, `NEVERLIGHT_MAIL_USER`).
+- Integration tests live in `tests/` split by behavior (`mailbox_query_body`, `flags_move_delete`, `sync_push_search`, `send_identity`) with shared helpers in `tests/common/mod.rs`. They gate on env vars (`NEVERLIGHT_MAIL_JMAP_TOKEN`, `NEVERLIGHT_MAIL_USER`).
 - Each test function tests one behavior. Name it after what it asserts: `flags_from_empty_keywords`, `rejects_missing_mail_capability`, `folders_are_isolated_per_account`.
 - Use `assert_eq!` with descriptive messages when the failure isn't obvious from the values alone.
 - Test fixtures (real emails, JSON responses) go in `tests/fixtures/`.
 - Extract `sample_*()` helpers for test data construction — don't duplicate struct literals across tests.
-- Run `cargo test` before considering any change done. Run `cargo clippy` too.
+- Run `just check` (fmt + clippy + unit tests) before considering any change done.
 
 ---
 

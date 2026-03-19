@@ -175,8 +175,14 @@ mod tests {
 
     #[test]
     fn mailbox_role_parsing() {
-        assert_eq!(MailboxRole::from_str_opt(Some("inbox")), Some(MailboxRole::Inbox));
-        assert_eq!(MailboxRole::from_str_opt(Some("trash")), Some(MailboxRole::Trash));
+        assert_eq!(
+            MailboxRole::from_str_opt(Some("inbox")),
+            Some(MailboxRole::Inbox)
+        );
+        assert_eq!(
+            MailboxRole::from_str_opt(Some("trash")),
+            Some(MailboxRole::Trash)
+        );
         assert_eq!(MailboxRole::from_str_opt(None), None);
     }
 

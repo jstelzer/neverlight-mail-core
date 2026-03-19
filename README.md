@@ -16,11 +16,11 @@ neverlight-mail-core = "0.1.0"
 | Module      | Purpose                                                          |
 |-------------|------------------------------------------------------------------|
 | `client`    | `JmapClient` — HTTP transport, request batching, blob ops       |
-| `session`   | Session discovery, capability negotiation                        |
-| `email`     | Email/query, Email/get, Email/set, body fetch, flag ops         |
-| `mailbox`   | Mailbox/get, Mailbox/changes, Mailbox/set                       |
+| `session`   | Session discovery, capability negotiation, shared capability detection |
+| `email/`    | Email/query, Email/get, body fetch, flag ops, move/delete, search |
+| `mailbox`   | Mailbox/get, Mailbox/changes, Mailbox/set (create, rename, destroy) |
 | `submit`    | EmailSubmission/set (sending via JMAP, replaces SMTP)            |
-| `sync`      | Delta sync loop via Email/changes + Mailbox/changes              |
+| `sync`      | Account-global delta sync via Email/changes + Mailbox/changes    |
 | `backfill`  | Background backfill of older messages into cache                 |
 | `push`      | EventSource SSE notifications (RFC 8620 §7.3)                   |
 | `parse`     | RFC 5322 body extraction via mail-parser                         |
@@ -31,7 +31,7 @@ neverlight-mail-core = "0.1.0"
 | `models`    | `Folder`, `MessageSummary`, `AttachmentData`                     |
 | `types`     | `EmailId`, `MailboxId`, `Flags`, `FlagOp`, `State`, `SyncEvent` |
 | `setup`     | UI-agnostic account setup state machine                          |
-| `store`     | SQLite cache with async facade, FTS5 search, flag tracking       |
+| `store/`    | SQLite cache: message/folder/body/flag/search/backfill queries, async facade, FTS5 |
 
 ## Re-exports
 
@@ -48,19 +48,37 @@ use neverlight_mail_core::{
 
 ```rust
 use neverlight_mail_core::config;
-use neverlight_mail_core::client::JmapClient;
+use neverlight_mail_core::session::JmapSession;
 use neverlight_mail_core::store::CacheHandle;
+use neverlight_mail_core::{email, mailbox, sync};
 
 // Resolve accounts from env vars or config file
 let accounts = config::resolve_all_accounts()?;
 let account = &accounts[0];
 
-// Connect via JMAP
-let client = JmapClient::connect(&account.jmap_url, &account.auth).await?;
+// Connect — discovers capabilities, builds JmapClient
+let (session, client) = JmapSession::connect(&account).await?;
+
+// Sync mailboxes, then emails in inbox
+let cache = CacheHandle::open("my-app")?;
+let folders = sync::sync_mailboxes(&client, &cache, &session.account_id).await?;
+let inbox_id = mailbox::find_by_role(&folders, "inbox").unwrap();
+let messages = sync::sync_emails(&client, &cache, &session.account_id, &inbox_id, 50).await?;
 ```
+
+## Development
+
+```bash
+just check          # fmt + clippy + unit tests
+just test-all       # unit + integration tests
+just release        # check + release build
+```
+
+Integration tests require `NEVERLIGHT_MAIL_JMAP_TOKEN` and `NEVERLIGHT_MAIL_USER` (source from `.envrc`).
 
 ## Consumers
 
+- [neverlight-mail-macos](https://github.com/jstelzer/neverlight-mail-macos) — macOS + iOS native client
 - [neverlight-mail](https://github.com/jstelzer/neverlight-mail) — COSMIC desktop email client
 - [neverlight-mail-tui](https://github.com/jstelzer/neverlight-mail-tui) — ratatui terminal client
 

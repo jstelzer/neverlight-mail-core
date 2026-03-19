@@ -67,14 +67,20 @@ pub fn find_identity_for_address<'a>(
     let from_domain = from_lower.rsplit_once('@').map(|(_, d)| d);
 
     // Exact match
-    if let Some(id) = identities.iter().find(|id| id.email.to_lowercase() == from_lower) {
+    if let Some(id) = identities
+        .iter()
+        .find(|id| id.email.to_lowercase() == from_lower)
+    {
         return Some(id);
     }
 
     // Wildcard domain match: identity email is `*@domain`
     if let Some(domain) = from_domain {
         let wildcard = format!("*@{domain}");
-        if let Some(id) = identities.iter().find(|id| id.email.to_lowercase() == wildcard) {
+        if let Some(id) = identities
+            .iter()
+            .find(|id| id.email.to_lowercase() == wildcard)
+        {
             return Some(id);
         }
     }
@@ -105,11 +111,13 @@ pub struct SendRequest<'a> {
 /// Separated from `send()` so the exact JSON payload is unit-testable
 /// without a live server.
 fn build_draft_create(req: &SendRequest<'_>) -> Value {
-    let to_addrs: Vec<Value> = req.to
+    let to_addrs: Vec<Value> = req
+        .to
         .iter()
         .map(|addr| serde_json::json!({ "email": addr }))
         .collect();
-    let cc_addrs: Vec<Value> = req.cc
+    let cc_addrs: Vec<Value> = req
+        .cc
         .iter()
         .map(|addr| serde_json::json!({ "email": addr }))
         .collect();
@@ -182,17 +190,19 @@ fn build_on_success_patch(req: &SendRequest<'_>) -> Value {
 /// 1. `Email/set` create — creates the draft with body parts
 /// 2. `EmailSubmission/set` — submits for delivery via creation reference `#draft`
 /// 3. `onSuccessUpdateEmail` — moves from Drafts→Sent on success
-pub async fn send(
-    client: &JmapClient,
-    req: &SendRequest<'_>,
-) -> Result<String, JmapError> {
+pub async fn send(client: &JmapClient, req: &SendRequest<'_>) -> Result<String, JmapError> {
     log::info!(
         "submit::send: from={}, to={:?}, cc={:?}, identity={}, subject={}",
-        req.from, req.to, req.cc, req.identity_id, req.subject,
+        req.from,
+        req.to,
+        req.cc,
+        req.identity_id,
+        req.subject,
     );
     log::debug!(
         "submit::send: drafts_mailbox={}, sent_mailbox={}",
-        req.drafts_mailbox_id, req.sent_mailbox_id,
+        req.drafts_mailbox_id,
+        req.sent_mailbox_id,
     );
 
     let email_create = build_draft_create(req);
@@ -234,11 +244,18 @@ pub async fn send(
         log::debug!("submit::send: Email/set response: {}", cr.1);
         if let Some(errors) = cr.1.get("notCreated").and_then(|v| v.as_object()) {
             if let Some(err) = errors.get("draft") {
-                let err_type = err.get("type").and_then(|v| v.as_str()).unwrap_or("unknown");
-                let desc = err.get("description").and_then(|v| v.as_str()).unwrap_or("");
+                let err_type = err
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                let desc = err
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 log::error!(
                     "submit::send: Email/set create failed: type={}, desc={}",
-                    err_type, desc,
+                    err_type,
+                    desc,
                 );
                 return Err(JmapError::MethodError {
                     method: "Email/set create".into(),
@@ -255,11 +272,18 @@ pub async fn send(
         log::debug!("submit::send: EmailSubmission/set response: {}", sr.1);
         if let Some(errors) = sr.1.get("notCreated").and_then(|v| v.as_object()) {
             if let Some(err) = errors.get("send") {
-                let err_type = err.get("type").and_then(|v| v.as_str()).unwrap_or("unknown");
-                let desc = err.get("description").and_then(|v| v.as_str()).unwrap_or("");
+                let err_type = err
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                let desc = err
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 log::error!(
                     "submit::send: EmailSubmission/set failed: type={}, desc={}",
-                    err_type, desc,
+                    err_type,
+                    desc,
                 );
                 return Err(JmapError::MethodError {
                     method: "EmailSubmission/set".into(),
@@ -290,10 +314,25 @@ pub async fn send(
 fn parse_identities(list: &[Value]) -> Vec<Identity> {
     list.iter()
         .map(|item| Identity {
-            id: item.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
-            name: item.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
-            email: item.get("email").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
-            may_delete: item.get("mayDelete").and_then(|v| v.as_bool()).unwrap_or(false),
+            id: item
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            name: item
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            email: item
+                .get("email")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            may_delete: item
+                .get("mayDelete")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
         })
         .collect()
 }
@@ -378,7 +417,10 @@ mod tests {
         assert_eq!(draft["textBody"][0]["type"], "text/plain");
 
         // htmlBody should NOT be present
-        assert!(draft.get("htmlBody").is_none(), "htmlBody should be omitted for plain-text-only");
+        assert!(
+            draft.get("htmlBody").is_none(),
+            "htmlBody should be omitted for plain-text-only"
+        );
 
         // bodyValues should only have "text"
         assert!(draft["bodyValues"].get("text").is_some());
@@ -415,7 +457,10 @@ mod tests {
 
     #[test]
     fn draft_multiple_recipients() {
-        let to = vec!["bob@example.com".to_string(), "carol@example.com".to_string()];
+        let to = vec![
+            "bob@example.com".to_string(),
+            "carol@example.com".to_string(),
+        ];
         let cc = vec!["dave@example.com".to_string()];
         let req = SendRequest {
             to: &to,

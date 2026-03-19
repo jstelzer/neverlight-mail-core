@@ -428,11 +428,9 @@ impl SetupModel {
                 };
 
                 // If URL/username changed, require token re-entry
-                let creds_changed =
-                    existing.jmap_url != jmap_url || existing.username != username;
+                let creds_changed = existing.jmap_url != jmap_url || existing.username != username;
                 if creds_changed && self.token.is_empty() {
-                    self.error =
-                        Some("Token required when changing server URL or username".into());
+                    self.error = Some("Token required when changing server URL or username".into());
                     return SetupTransition::Continue;
                 }
 

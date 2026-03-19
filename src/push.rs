@@ -41,10 +41,7 @@ impl Default for EventSourceConfig {
 ///
 /// If the template contains `{types}`, `{closeafter}`, `{ping}` placeholders
 /// (RFC 8620 §7.3), they are substituted. Otherwise query params are appended.
-pub fn build_event_source_url(
-    template: &str,
-    config: &EventSourceConfig,
-) -> String {
+pub fn build_event_source_url(template: &str, config: &EventSourceConfig) -> String {
     let types_str = config.types.join(",");
     let close_after_str = config.close_after.to_string();
     let ping_str = config.ping.to_string();
@@ -58,9 +55,7 @@ pub fn build_event_source_url(
     } else {
         // Bare URL — append query parameters
         let sep = if template.contains('?') { "&" } else { "?" };
-        format!(
-            "{template}{sep}types={types_str}&closeafter={close_after_str}&ping={ping_str}"
-        )
+        format!("{template}{sep}types={types_str}&closeafter={close_after_str}&ping={ping_str}")
     }
 }
 
@@ -100,6 +95,48 @@ pub fn parse_state_change(data: &str, account_id: &str) -> Option<StateChange> {
     }
 }
 
+/// A parsed SSE event block.
+struct SseEvent {
+    event_type: Option<String>,
+    data: String,
+}
+
+/// Split the buffer at the first SSE event boundary (blank line).
+/// Returns (event_block, remaining_buffer) or None if no complete event yet.
+fn split_sse_event(buf: &str) -> Option<(String, String)> {
+    // Try \r\n\r\n first (CRLF), then \n\n (LF)
+    buf.find("\r\n\r\n")
+        .map(|pos| (buf[..pos].to_string(), buf[pos + 4..].to_string()))
+        .or_else(|| {
+            buf.find("\n\n")
+                .map(|pos| (buf[..pos].to_string(), buf[pos + 2..].to_string()))
+        })
+}
+
+/// Parse an SSE event block into its `event:` type and concatenated `data:` payload.
+fn parse_sse_block(block: &str) -> SseEvent {
+    let mut event_type = None;
+    let mut data_parts: Vec<&str> = Vec::new();
+
+    for line in block.lines() {
+        // Strip trailing CR if present (mixed line endings)
+        let line = line.strip_suffix('\r').unwrap_or(line);
+
+        if let Some(value) = line.strip_prefix("event:") {
+            event_type = Some(value.trim().to_string());
+        } else if let Some(value) = line.strip_prefix("data:") {
+            data_parts.push(value.trim());
+        }
+        // Ignore id:, retry:, comments (:), and unknown fields
+    }
+
+    SseEvent {
+        event_type,
+        // Per SSE spec, multiple data: lines are joined with newlines
+        data: data_parts.join("\n"),
+    }
+}
+
 /// Listen to the EventSource stream and call `on_change` for each state change.
 ///
 /// This is a long-lived connection. Call from a spawned task.
@@ -117,7 +154,8 @@ pub async fn listen(
     log::info!("Connecting EventSource: {}", url);
 
     let auth = client.auth_header().await;
-    let mut resp = client.http
+    let mut resp = client
+        .http
         .get(&url)
         .header("Accept", "text/event-stream")
         .header("Authorization", &auth)
@@ -137,30 +175,36 @@ pub async fn listen(
     let mut buffer = String::new();
     let mut events_received: u32 = 0;
 
-    while let Some(chunk) = resp.chunk().await.map_err(|e| format!("EventSource read error: {e}"))? {
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| format!("EventSource read error: {e}"))?
+    {
         buffer.push_str(&String::from_utf8_lossy(&chunk));
 
-        // SSE events are terminated by a blank line (\n\n)
-        while let Some(pos) = buffer.find("\n\n") {
-            let event_block = buffer[..pos].to_string();
-            buffer = buffer[pos + 2..].to_string();
+        // Split on blank lines (SSE event boundary). Accept both \n\n and \r\n\r\n.
+        while let Some((block, rest)) = split_sse_event(&buffer) {
+            buffer = rest;
 
-            for line in event_block.lines() {
-                let Some(data) = line.strip_prefix("data:") else {
-                    continue;
-                };
-                let data = data.trim();
-                if data.is_empty() {
+            let parsed = parse_sse_block(&block);
+
+            // Only process "state" events (or events with no explicit type, per SSE spec default)
+            if let Some(ref et) = parsed.event_type {
+                if et != "state" {
                     continue;
                 }
+            }
 
-                if let Some(change) = parse_state_change(data, &client.account_id) {
-                    log::debug!("EventSource: state change received");
-                    on_change(change);
-                    events_received += 1;
-                    if config.close_after > 0 && events_received >= config.close_after {
-                        return Ok(());
-                    }
+            if parsed.data.is_empty() {
+                continue;
+            }
+
+            if let Some(change) = parse_state_change(&parsed.data, &client.account_id) {
+                log::debug!("EventSource: state change received");
+                on_change(change);
+                events_received += 1;
+                if config.close_after > 0 && events_received >= config.close_after {
+                    return Ok(());
                 }
             }
         }
@@ -192,7 +236,8 @@ mod tests {
 
     #[test]
     fn builds_url_with_defaults() {
-        let template = "https://example.com/event/?types={types}&closeafter={closeafter}&ping={ping}";
+        let template =
+            "https://example.com/event/?types={types}&closeafter={closeafter}&ping={ping}";
         let config = EventSourceConfig::default();
         let url = build_event_source_url(template, &config);
         assert!(url.contains("types=Email,Mailbox"));
@@ -229,5 +274,69 @@ mod tests {
         assert!(parse_state_change("not json", "u1234").is_none());
         assert!(parse_state_change("{}", "u1234").is_none());
         assert!(parse_state_change(r#"{"changed":{}}"#, "u1234").is_none());
+    }
+
+    // -- SSE block parsing ---------------------------------------------------
+
+    #[test]
+    fn splits_lf_events() {
+        let buf = "data: hello\n\ndata: world\n\n";
+        let (block, rest) = split_sse_event(buf).unwrap();
+        assert_eq!(block, "data: hello");
+        assert_eq!(rest, "data: world\n\n");
+    }
+
+    #[test]
+    fn splits_crlf_events() {
+        let buf = "data: hello\r\n\r\ndata: world\r\n\r\n";
+        let (block, rest) = split_sse_event(buf).unwrap();
+        assert_eq!(block, "data: hello");
+        assert_eq!(rest, "data: world\r\n\r\n");
+    }
+
+    #[test]
+    fn no_split_on_incomplete() {
+        assert!(split_sse_event("data: partial\n").is_none());
+        assert!(split_sse_event("data: partial").is_none());
+    }
+
+    #[test]
+    fn parses_sse_block_with_event_type() {
+        let block = "event: state\ndata: {\"foo\":1}";
+        let parsed = parse_sse_block(block);
+        assert_eq!(parsed.event_type.as_deref(), Some("state"));
+        assert_eq!(parsed.data, r#"{"foo":1}"#);
+    }
+
+    #[test]
+    fn parses_sse_block_no_event_type() {
+        let block = "data: {\"foo\":1}";
+        let parsed = parse_sse_block(block);
+        assert!(parsed.event_type.is_none());
+        assert_eq!(parsed.data, r#"{"foo":1}"#);
+    }
+
+    #[test]
+    fn parses_multiline_data() {
+        let block = "data: line1\ndata: line2\ndata: line3";
+        let parsed = parse_sse_block(block);
+        assert_eq!(parsed.data, "line1\nline2\nline3");
+    }
+
+    #[test]
+    fn handles_crlf_lines_in_block() {
+        let block = "event: state\r\ndata: payload";
+        let parsed = parse_sse_block(block);
+        assert_eq!(parsed.event_type.as_deref(), Some("state"));
+        assert_eq!(parsed.data, "payload");
+    }
+
+    #[test]
+    fn ignores_non_state_event_types() {
+        // Verifies the parse_sse_block captures the event type correctly
+        // so the caller can filter on it
+        let block = "event: ping\ndata: {}";
+        let parsed = parse_sse_block(block);
+        assert_eq!(parsed.event_type.as_deref(), Some("ping"));
     }
 }

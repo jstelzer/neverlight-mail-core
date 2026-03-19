@@ -118,7 +118,8 @@ pub async fn query_and_get(
     let messages = parse_email_list(&get_resp.1, mailbox_id)?;
 
     // Capture the Email/get state (for Email/changes, distinct from queryState)
-    let get_state = get_resp.1
+    let get_state = get_resp
+        .1
         .get("state")
         .and_then(|v| v.as_str())
         .map(|s| State(s.to_string()));
@@ -179,10 +180,7 @@ pub(super) fn parse_query_result(data: &Value) -> Result<QueryResult, JmapError>
         .unwrap_or("")
         .to_string();
 
-    let total = data
-        .get("total")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0) as u32;
+    let total = data.get("total").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
 
     let can_calculate_changes = data
         .get("canCalculateChanges")
@@ -198,7 +196,10 @@ pub(super) fn parse_query_result(data: &Value) -> Result<QueryResult, JmapError>
     })
 }
 
-pub(super) fn parse_email_list(data: &Value, fallback_mailbox_id: &str) -> Result<Vec<MessageSummary>, JmapError> {
+pub(super) fn parse_email_list(
+    data: &Value,
+    fallback_mailbox_id: &str,
+) -> Result<Vec<MessageSummary>, JmapError> {
     let list = data
         .get("list")
         .and_then(|v| v.as_array())
@@ -281,18 +282,14 @@ fn parse_email_summary(item: &Value, fallback_mailbox_id: &str) -> MessageSummar
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    let message_id_arr = item
-        .get("messageId")
-        .and_then(|v| v.as_array());
+    let message_id_arr = item.get("messageId").and_then(|v| v.as_array());
     let message_id = message_id_arr
         .and_then(|arr| arr.first())
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .to_string();
 
-    let in_reply_to_arr = item
-        .get("inReplyTo")
-        .and_then(|v| v.as_array());
+    let in_reply_to_arr = item.get("inReplyTo").and_then(|v| v.as_array());
     let in_reply_to = in_reply_to_arr
         .and_then(|arr| arr.first())
         .and_then(|v| v.as_str())

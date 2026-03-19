@@ -42,7 +42,10 @@ pub async fn sync_mailboxes(
         .await
         .map_err(cache_err)?;
 
-    log::debug!("sync_mailboxes: state={:?}", since_state.as_deref().unwrap_or("(none)"));
+    log::debug!(
+        "sync_mailboxes: state={:?}",
+        since_state.as_deref().unwrap_or("(none)")
+    );
     let folders = match since_state {
         Some(state) => sync_mailboxes_delta(client, cache, account_id, &state).await?,
         None => sync_mailboxes_full(client, cache, account_id).await?,
@@ -57,7 +60,10 @@ async fn sync_mailboxes_full(
     cache: &CacheHandle,
     account_id: &str,
 ) -> Result<Vec<Folder>, JmapError> {
-    log::info!("sync_mailboxes_full: fetching all mailboxes for {}", account_id);
+    log::info!(
+        "sync_mailboxes_full: fetching all mailboxes for {}",
+        account_id
+    );
     let call = client.method(
         "Mailbox/get",
         serde_json::json!({
@@ -67,26 +73,34 @@ async fn sync_mailboxes_full(
     );
 
     let resp = client.call(vec![call]).await?;
-    let mc = resp.method_responses.iter().find(|mc| mc.2 == "m0")
+    let mc = resp
+        .method_responses
+        .iter()
+        .find(|mc| mc.2 == "m0")
         .ok_or_else(|| JmapError::RequestError("Missing Mailbox/get response".into()))?;
 
-    let state = mc.1.get("state")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
+    let state =
+        mc.1.get("state")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
 
-    let list = mc.1.get("list")
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| JmapError::RequestError("Missing list in Mailbox/get".into()))?;
+    let list =
+        mc.1.get("list")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| JmapError::RequestError("Missing list in Mailbox/get".into()))?;
 
     let folders = mailbox::parse_mailboxes_from_list(list)?;
 
     // Persist folders + state atomically
-    cache.save_folders_and_set_state(
-        account_id.to_string(),
-        folders.clone(),
-        "Mailbox".to_string(),
-        state.to_string(),
-    ).await.map_err(cache_err)?;
+    cache
+        .save_folders_and_set_state(
+            account_id.to_string(),
+            folders.clone(),
+            "Mailbox".to_string(),
+            state.to_string(),
+        )
+        .await
+        .map_err(cache_err)?;
 
     Ok(folders)
 }
@@ -97,7 +111,11 @@ async fn sync_mailboxes_delta(
     account_id: &str,
     since_state: &str,
 ) -> Result<Vec<Folder>, JmapError> {
-    log::debug!("sync_mailboxes_delta: since_state={} for {}", since_state, account_id);
+    log::debug!(
+        "sync_mailboxes_delta: since_state={} for {}",
+        since_state,
+        account_id
+    );
     let call = client.method(
         "Mailbox/changes",
         serde_json::json!({ "sinceState": since_state }),
@@ -111,25 +129,35 @@ async fn sync_mailboxes_delta(
         }
         other => other?,
     };
-    let mc = resp.method_responses.iter().find(|mc| mc.2 == "mc0")
+    let mc = resp
+        .method_responses
+        .iter()
+        .find(|mc| mc.2 == "mc0")
         .ok_or_else(|| JmapError::RequestError("Missing Mailbox/changes response".into()))?;
 
     let changes = parse_changes_response(&mc.1)?;
 
     if changes.created.is_empty() && changes.updated.is_empty() && changes.destroyed.is_empty() {
         // No changes — just update state and return cached folders
-        cache.set_state(
-            account_id.to_string(),
-            "Mailbox".to_string(),
-            changes.new_state.0.clone(),
-        ).await.map_err(cache_err)?;
-        let folders = cache.load_folders(account_id.to_string()).await
+        cache
+            .set_state(
+                account_id.to_string(),
+                "Mailbox".to_string(),
+                changes.new_state.0.clone(),
+            )
+            .await
+            .map_err(cache_err)?;
+        let folders = cache
+            .load_folders(account_id.to_string())
+            .await
             .map_err(cache_err)?;
         return Ok(folders);
     }
 
     // Fetch only created + updated mailboxes by ID
-    let fetch_ids: Vec<String> = changes.created.iter()
+    let fetch_ids: Vec<String> = changes
+        .created
+        .iter()
         .chain(changes.updated.iter())
         .cloned()
         .collect();
@@ -141,27 +169,43 @@ async fn sync_mailboxes_delta(
     }
 
     if !changes.destroyed.is_empty() {
-        log::info!("Mailbox delta: removing {} destroyed folders", changes.destroyed.len());
+        log::info!(
+            "Mailbox delta: removing {} destroyed folders",
+            changes.destroyed.len()
+        );
     }
 
     // Atomic: upsert + remove + set state in one transaction
-    cache.delta_folders_and_set_state(
-        account_id.to_string(),
-        upsert,
-        changes.destroyed,
-        "Mailbox".to_string(),
-        changes.new_state.0.clone(),
-    ).await.map_err(cache_err)?;
+    cache
+        .delta_folders_and_set_state(
+            account_id.to_string(),
+            upsert,
+            changes.destroyed,
+            "Mailbox".to_string(),
+            changes.new_state.0.clone(),
+        )
+        .await
+        .map_err(cache_err)?;
 
     // Return full folder list from cache
-    let folders = cache.load_folders(account_id.to_string()).await
+    let folders = cache
+        .load_folders(account_id.to_string())
+        .await
         .map_err(cache_err)?;
     Ok(folders)
 }
 
-/// Sync emails in a mailbox: fetch changes since last known state.
+/// Sync emails: fetch account-global changes since last known state,
+/// fan out to all affected mailboxes, then return results for `mailbox_id`.
 ///
-/// If no state is stored, performs a full query+get.
+/// Email/changes (RFC 8620 §5.2) is account-scoped — a single state cursor
+/// covers all mailboxes. The delta path fetches ALL changed/created/destroyed
+/// messages, saves them to their correct mailboxes via the junction table,
+/// then advances the global "Email" state. The `mailbox_id` parameter only
+/// controls which mailbox's messages are returned to the caller.
+///
+/// If no state is stored, performs a full query+get (head sync) for the
+/// requested mailbox.
 pub async fn sync_emails(
     client: &JmapClient,
     cache: &CacheHandle,
@@ -169,10 +213,16 @@ pub async fn sync_emails(
     mailbox_id: &str,
     page_size: u32,
 ) -> Result<Vec<MessageSummary>, JmapError> {
-    log::debug!("sync_emails: start for {} mailbox={}", account_id, mailbox_id);
+    log::debug!(
+        "sync_emails: start for {} mailbox={}",
+        account_id,
+        mailbox_id
+    );
     // Expire stuck pending ops (>5 minutes old) before syncing
-    cache.expire_pending_ops(account_id.to_string(), 300)
-        .await.map_err(cache_err)?;
+    cache
+        .expire_pending_ops(account_id.to_string(), 300)
+        .await
+        .map_err(cache_err)?;
 
     let resource = "Email".to_string();
     let since_state = cache
@@ -180,14 +230,18 @@ pub async fn sync_emails(
         .await
         .map_err(cache_err)?;
 
-    log::debug!("sync_emails: email state={:?}", since_state.as_deref().unwrap_or("(none)"));
+    log::debug!(
+        "sync_emails: email state={:?}",
+        since_state.as_deref().unwrap_or("(none)")
+    );
     match since_state {
         Some(state) => {
-            sync_emails_delta(client, cache, account_id, mailbox_id, &state, &resource, page_size).await
+            sync_emails_delta(
+                client, cache, account_id, mailbox_id, &state, &resource, page_size,
+            )
+            .await
         }
-        None => {
-            sync_emails_head(client, cache, account_id, mailbox_id, &resource, page_size).await
-        }
+        None => sync_emails_head(client, cache, account_id, mailbox_id, &resource, page_size).await,
     }
 }
 
@@ -199,10 +253,17 @@ async fn sync_emails_head(
     resource: &str,
     page_size: u32,
 ) -> Result<Vec<MessageSummary>, JmapError> {
-    log::info!("sync_emails_head: fetching up to {} emails for mailbox={}", page_size, mailbox_id);
+    log::info!(
+        "sync_emails_head: fetching up to {} emails for mailbox={}",
+        page_size,
+        mailbox_id
+    );
     let (mut messages, query_result) =
         email::query_and_get(client, mailbox_id, page_size, 0).await?;
-    log::debug!("sync_emails_head: got {} messages from server", messages.len());
+    log::debug!(
+        "sync_emails_head: got {} messages from server",
+        messages.len()
+    );
 
     // Set account_id on all messages before caching
     for m in &mut messages {
@@ -210,19 +271,23 @@ async fn sync_emails_head(
     }
 
     // Store the Email/get state (for Email/changes), not the queryState
-    let state = query_result.get_state
+    let state = query_result
+        .get_state
         .as_ref()
         .unwrap_or(&query_result.state);
 
     // Atomic: save messages + set state + mark mailbox as populated
-    cache.save_messages_and_set_state(
-        account_id.to_string(),
-        mailbox_id.to_string(),
-        messages.clone(),
-        resource.to_string(),
-        state.0.clone(),
-        mailbox_id.to_string(),
-    ).await.map_err(cache_err)?;
+    cache
+        .save_messages_and_set_state(
+            account_id.to_string(),
+            mailbox_id.to_string(),
+            messages.clone(),
+            resource.to_string(),
+            state.0.clone(),
+            mailbox_id.to_string(),
+        )
+        .await
+        .map_err(cache_err)?;
 
     // Only prune when backfill hasn't populated older messages.
     // Backfill is additive — pruning would wipe backfilled history.
@@ -235,11 +300,10 @@ async fn sync_emails_head(
 
     if !has_backfill {
         let live_ids: Vec<String> = messages.iter().map(|m| m.email_id.clone()).collect();
-        let pruned = cache.prune_mailbox(
-            account_id.to_string(),
-            mailbox_id.to_string(),
-            live_ids,
-        ).await.map_err(cache_err)?;
+        let pruned = cache
+            .prune_mailbox(account_id.to_string(), mailbox_id.to_string(), live_ids)
+            .await
+            .map_err(cache_err)?;
         if pruned > 0 {
             log::info!("Pruned {pruned} stale messages from {mailbox_id}");
         }
@@ -258,7 +322,11 @@ async fn sync_emails_delta(
     page_size: u32,
 ) -> Result<Vec<MessageSummary>, JmapError> {
     let mut current_state = since_state.to_string();
-    log::debug!("sync_emails_delta: since_state={} mailbox={}", since_state, mailbox_id);
+    log::debug!(
+        "sync_emails_delta: since_state={} mailbox={}",
+        since_state,
+        mailbox_id
+    );
 
     // Check if this mailbox has ever been fully populated. If not, delta sync
     // would deliver only changed messages — skip straight to head sync.
@@ -287,23 +355,37 @@ async fn sync_emails_delta(
 
         let resp = match client.call(vec![call]).await {
             Err(JmapError::CannotCalculateChanges) => {
-                log::info!("Email cannotCalculateChanges for {} — head resync", mailbox_id);
-                return sync_emails_head(client, cache, account_id, mailbox_id, resource, page_size).await;
+                log::info!(
+                    "Email cannotCalculateChanges for {} — head resync",
+                    mailbox_id
+                );
+                return sync_emails_head(
+                    client, cache, account_id, mailbox_id, resource, page_size,
+                )
+                .await;
             }
             other => other?,
         };
-        let mc = resp.method_responses.iter().find(|mc| mc.2 == "ec0")
+        let mc = resp
+            .method_responses
+            .iter()
+            .find(|mc| mc.2 == "ec0")
             .ok_or_else(|| JmapError::RequestError("Missing Email/changes response".into()))?;
 
         let changes = parse_changes_response(&mc.1)?;
         log::debug!(
             "sync_emails_delta: iteration={} created={} updated={} destroyed={} has_more={}",
-            iteration, changes.created.len(), changes.updated.len(),
-            changes.destroyed.len(), changes.has_more_changes,
+            iteration,
+            changes.created.len(),
+            changes.updated.len(),
+            changes.destroyed.len(),
+            changes.has_more_changes,
         );
 
         // Fetch created + updated emails
-        let fetch_ids: Vec<String> = changes.created.iter()
+        let fetch_ids: Vec<String> = changes
+            .created
+            .iter()
             .chain(changes.updated.iter())
             .cloned()
             .collect();
@@ -325,7 +407,9 @@ async fn sync_emails_delta(
                 } else {
                     log::debug!(
                         "Delta sync: email {} no longer in {} (now in {:?})",
-                        m.email_id, mailbox_id, m.mailbox_ids,
+                        m.email_id,
+                        mailbox_id,
+                        m.mailbox_ids,
                     );
                     let context = m.mailbox_ids.first().cloned().unwrap_or_default();
                     save_groups.push((context, vec![m]));
@@ -338,13 +422,16 @@ async fn sync_emails_delta(
         }
 
         // Atomic: remove destroyed + save created/updated + set state
-        cache.delta_email_batch(
-            account_id.to_string(),
-            changes.destroyed.clone(),
-            save_groups,
-            resource.to_string(),
-            changes.new_state.0.clone(),
-        ).await.map_err(cache_err)?;
+        cache
+            .delta_email_batch(
+                account_id.to_string(),
+                changes.destroyed.clone(),
+                save_groups,
+                resource.to_string(),
+                changes.new_state.0.clone(),
+            )
+            .await
+            .map_err(cache_err)?;
 
         if !changes.has_more_changes {
             break;
@@ -352,18 +439,17 @@ async fn sync_emails_delta(
 
         log::info!(
             "Email/changes hasMoreChanges for {} (iteration {}) — fetching next batch",
-            mailbox_id, iteration
+            mailbox_id,
+            iteration
         );
         current_state = changes.new_state.0;
     }
 
     // Return full list from cache
-    let messages = cache.load_messages(
-        account_id.to_string(),
-        mailbox_id.to_string(),
-        page_size,
-        0,
-    ).await.map_err(cache_err)?;
+    let messages = cache
+        .load_messages(account_id.to_string(), mailbox_id.to_string(), page_size, 0)
+        .await
+        .map_err(cache_err)?;
 
     Ok(messages)
 }

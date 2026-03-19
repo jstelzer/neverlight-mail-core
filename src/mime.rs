@@ -227,8 +227,7 @@ mod tests {
         let result = render_body_markdown(None, Some(DENTIST_HTML));
         // Footer sections should be on separate lines, not one blob
         assert!(
-            result.contains("Noble Dentistry")
-                && result.contains('\n'),
+            result.contains("Noble Dentistry") && result.contains('\n'),
             "footer content should have line breaks between sections"
         );
     }

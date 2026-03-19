@@ -238,8 +238,7 @@ fn remove_folders_in_tx(
     for id in mailbox_ids {
         params.push(Box::new(id.clone()));
     }
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
-        params.iter().map(|p| p.as_ref()).collect();
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
 
     // Cascade: junction rows → orphaned messages/attachments → folders
     let sql = format!(
@@ -263,9 +262,8 @@ fn remove_folders_in_tx(
     )
     .map_err(|e| format!("Cache cascade error: {e}"))?;
 
-    let sql = format!(
-        "DELETE FROM folders WHERE account_id = ?1 AND mailbox_id IN ({placeholders})"
-    );
+    let sql =
+        format!("DELETE FROM folders WHERE account_id = ?1 AND mailbox_id IN ({placeholders})");
     tx.execute(&sql, param_refs.as_slice())
         .map_err(|e| format!("Cache delete error: {e}"))?;
 
@@ -344,8 +342,7 @@ pub(super) fn do_remove_folders_by_id(
     for id in mailbox_ids {
         params.push(Box::new(id.clone()));
     }
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
-        params.iter().map(|p| p.as_ref()).collect();
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
 
     // Cascade: junction rows → orphaned messages/attachments → folders
 
@@ -372,9 +369,8 @@ pub(super) fn do_remove_folders_by_id(
     )
     .map_err(|e| format!("Cache cascade error: {e}"))?;
 
-    let sql = format!(
-        "DELETE FROM folders WHERE account_id = ?1 AND mailbox_id IN ({placeholders})"
-    );
+    let sql =
+        format!("DELETE FROM folders WHERE account_id = ?1 AND mailbox_id IN ({placeholders})");
     tx.execute(&sql, param_refs.as_slice())
         .map_err(|e| format!("Cache delete error: {e}"))?;
 
@@ -431,18 +427,27 @@ pub(super) fn do_remove_account(conn: &Connection, account_id: &str) -> Result<(
         .unchecked_transaction()
         .map_err(|e| format!("Cache tx error: {e}"))?;
 
-    tx.execute("DELETE FROM message_mailboxes WHERE account_id = ?1", [account_id])
-        .map_err(|e| format!("Cache junction cleanup error: {e}"))?;
-    tx.execute("DELETE FROM attachments WHERE account_id = ?1", [account_id])
-        .map_err(|e| format!("Cache attachment cleanup error: {e}"))?;
+    tx.execute(
+        "DELETE FROM message_mailboxes WHERE account_id = ?1",
+        [account_id],
+    )
+    .map_err(|e| format!("Cache junction cleanup error: {e}"))?;
+    tx.execute(
+        "DELETE FROM attachments WHERE account_id = ?1",
+        [account_id],
+    )
+    .map_err(|e| format!("Cache attachment cleanup error: {e}"))?;
     tx.execute("DELETE FROM messages WHERE account_id = ?1", [account_id])
         .map_err(|e| format!("Cache message cleanup error: {e}"))?;
     tx.execute("DELETE FROM folders WHERE account_id = ?1", [account_id])
         .map_err(|e| format!("Cache folder cleanup error: {e}"))?;
     tx.execute("DELETE FROM sync_state WHERE account_id = ?1", [account_id])
         .map_err(|e| format!("Cache sync_state cleanup error: {e}"))?;
-    tx.execute("DELETE FROM backfill_progress WHERE account_id = ?1", [account_id])
-        .map_err(|e| format!("Cache backfill_progress cleanup error: {e}"))?;
+    tx.execute(
+        "DELETE FROM backfill_progress WHERE account_id = ?1",
+        [account_id],
+    )
+    .map_err(|e| format!("Cache backfill_progress cleanup error: {e}"))?;
 
     tx.commit()
         .map_err(|e| format!("Cache commit error: {e}"))?;
@@ -508,20 +513,28 @@ mod tests {
     fn folders_are_isolated_per_account() {
         let conn = setup_conn();
 
-        do_save_folders(&conn, "a", &[Folder {
-            mailbox_id: "mb1".into(),
-            unread_count: 1,
-            total_count: 2,
-            ..sample_folder("mb1")
-        }])
+        do_save_folders(
+            &conn,
+            "a",
+            &[Folder {
+                mailbox_id: "mb1".into(),
+                unread_count: 1,
+                total_count: 2,
+                ..sample_folder("mb1")
+            }],
+        )
         .expect("save folders a");
 
-        do_save_folders(&conn, "b", &[Folder {
-            mailbox_id: "mb1".into(),
-            unread_count: 9,
-            total_count: 10,
-            ..sample_folder("mb1")
-        }])
+        do_save_folders(
+            &conn,
+            "b",
+            &[Folder {
+                mailbox_id: "mb1".into(),
+                unread_count: 9,
+                total_count: 10,
+                ..sample_folder("mb1")
+            }],
+        )
         .expect("save folders b");
 
         let a_folders = do_load_folders(&conn, "a").expect("load folders a");
@@ -564,44 +577,49 @@ mod tests {
     fn load_folders_sorts_inbox_first_then_by_sort_order_then_alpha() {
         let conn = setup_conn();
 
-        do_save_folders(&conn, "a", &[
-            Folder {
-                name: "Zeta".into(),
-                path: "Zeta".into(),
-                mailbox_id: "mb3".into(),
-                role: None,
-                sort_order: 5,
-                unread_count: 0,
-                total_count: 0,
-            },
-            Folder {
-                name: "Alpha".into(),
-                path: "Alpha".into(),
-                mailbox_id: "mb2".into(),
-                role: None,
-                sort_order: 5,
-                unread_count: 0,
-                total_count: 0,
-            },
-            Folder {
-                name: "Drafts".into(),
-                path: "Drafts".into(),
-                mailbox_id: "mb4".into(),
-                role: Some("drafts".into()),
-                sort_order: 3,
-                unread_count: 0,
-                total_count: 0,
-            },
-            Folder {
-                name: "Inbox".into(),
-                path: "Inbox".into(),
-                mailbox_id: "mb1".into(),
-                role: Some("inbox".into()),
-                sort_order: 10,
-                unread_count: 0,
-                total_count: 0,
-            },
-        ]).expect("save folders");
+        do_save_folders(
+            &conn,
+            "a",
+            &[
+                Folder {
+                    name: "Zeta".into(),
+                    path: "Zeta".into(),
+                    mailbox_id: "mb3".into(),
+                    role: None,
+                    sort_order: 5,
+                    unread_count: 0,
+                    total_count: 0,
+                },
+                Folder {
+                    name: "Alpha".into(),
+                    path: "Alpha".into(),
+                    mailbox_id: "mb2".into(),
+                    role: None,
+                    sort_order: 5,
+                    unread_count: 0,
+                    total_count: 0,
+                },
+                Folder {
+                    name: "Drafts".into(),
+                    path: "Drafts".into(),
+                    mailbox_id: "mb4".into(),
+                    role: Some("drafts".into()),
+                    sort_order: 3,
+                    unread_count: 0,
+                    total_count: 0,
+                },
+                Folder {
+                    name: "Inbox".into(),
+                    path: "Inbox".into(),
+                    mailbox_id: "mb1".into(),
+                    role: Some("inbox".into()),
+                    sort_order: 10,
+                    unread_count: 0,
+                    total_count: 0,
+                },
+            ],
+        )
+        .expect("save folders");
 
         let folders = do_load_folders(&conn, "a").expect("load");
         let names: Vec<&str> = folders.iter().map(|f| f.name.as_str()).collect();
@@ -632,12 +650,10 @@ mod tests {
         let conn = setup_conn();
 
         // Save folder A via full save
-        do_save_folders(&conn, "a", &[sample_folder_named("mb1", "Alpha")])
-            .expect("save A");
+        do_save_folders(&conn, "a", &[sample_folder_named("mb1", "Alpha")]).expect("save A");
 
         // Upsert folder B — A should survive
-        do_upsert_folders(&conn, "a", &[sample_folder_named("mb2", "Beta")])
-            .expect("upsert B");
+        do_upsert_folders(&conn, "a", &[sample_folder_named("mb2", "Beta")]).expect("upsert B");
 
         let folders = do_load_folders(&conn, "a").expect("load");
         assert_eq!(folders.len(), 2);
@@ -649,14 +665,20 @@ mod tests {
     #[test]
     fn remove_folders_by_id_cascades() {
         let conn = setup_conn();
-        use crate::models::MessageSummary;
-        use crate::store::queries::{do_save_messages, do_load_messages, do_save_body, do_load_body};
         use crate::models::AttachmentData;
+        use crate::models::MessageSummary;
+        use crate::store::body_queries::{do_load_body, do_save_body};
+        use crate::store::message_queries::{do_load_messages, do_save_messages};
 
-        do_save_folders(&conn, "a", &[
-            sample_folder_named("mb1", "INBOX"),
-            sample_folder_named("mb2", "Trash"),
-        ]).expect("save folders");
+        do_save_folders(
+            &conn,
+            "a",
+            &[
+                sample_folder_named("mb1", "INBOX"),
+                sample_folder_named("mb2", "Trash"),
+            ],
+        )
+        .expect("save folders");
 
         let msg = MessageSummary {
             account_id: String::new(),
@@ -678,11 +700,19 @@ mod tests {
             thread_depth: 0,
         };
         do_save_messages(&conn, "a", "mb2", &[msg]).expect("save msg");
-        do_save_body(&conn, "a", "e1", "# body", "body", &[AttachmentData {
-            filename: "file.txt".into(),
-            mime_type: "text/plain".into(),
-            data: b"data".to_vec(),
-        }]).expect("save body");
+        do_save_body(
+            &conn,
+            "a",
+            "e1",
+            "# body",
+            "body",
+            &[AttachmentData {
+                filename: "file.txt".into(),
+                mime_type: "text/plain".into(),
+                data: b"data".to_vec(),
+            }],
+        )
+        .expect("save body");
 
         // Remove mb2 specifically
         do_remove_folders_by_id(&conn, "a", &["mb2".to_string()]).expect("remove mb2");
@@ -703,11 +733,16 @@ mod tests {
     fn remove_folders_by_id_does_not_affect_others() {
         let conn = setup_conn();
 
-        do_save_folders(&conn, "a", &[
-            sample_folder_named("mb1", "INBOX"),
-            sample_folder_named("mb2", "Sent"),
-            sample_folder_named("mb3", "Trash"),
-        ]).expect("save folders");
+        do_save_folders(
+            &conn,
+            "a",
+            &[
+                sample_folder_named("mb1", "INBOX"),
+                sample_folder_named("mb2", "Sent"),
+                sample_folder_named("mb3", "Trash"),
+            ],
+        )
+        .expect("save folders");
 
         do_remove_folders_by_id(&conn, "a", &["mb2".to_string()]).expect("remove mb2");
 

@@ -16,11 +16,7 @@ use super::query::{parse_email_list, parse_query_result, QueryResult, SUMMARY_PR
 ///
 /// Uses JMAP keyword patches: `keywords/$seen: true` or `keywords/$seen: null`.
 /// Setting to `null` removes the keyword (JMAP convention for patch-delete).
-pub async fn set_flag(
-    client: &JmapClient,
-    email_id: &str,
-    op: &FlagOp,
-) -> Result<(), JmapError> {
+pub async fn set_flag(client: &JmapClient, email_id: &str, op: &FlagOp) -> Result<(), JmapError> {
     let patch = flag_op_to_patch(op);
     let call = client.method(
         "Email/set",
@@ -50,20 +46,25 @@ pub async fn set_flags_batch(
         update.insert(email_id.clone(), flag_op_to_patch(op));
     }
 
-    let call = client.method(
-        "Email/set",
-        serde_json::json!({ "update": update }),
-        "fb0",
-    );
+    let call = client.method("Email/set", serde_json::json!({ "update": update }), "fb0");
 
     let resp = client.call(vec![call]).await?;
 
     // Check for any update errors
-    let set_resp = resp.method_responses.iter().find(|mc| mc.2 == "fb0")
+    let set_resp = resp
+        .method_responses
+        .iter()
+        .find(|mc| mc.2 == "fb0")
         .ok_or_else(|| JmapError::RequestError("Missing Email/set response".into()))?;
     if let Some(errors) = set_resp.1.get("notUpdated").and_then(|v| v.as_object()) {
         if let Some((id, err)) = errors.iter().next() {
-            let err_type = err.get("type").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let err_type = err
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            if err_type == "notFound" {
+                return Err(JmapError::NotFound(id.clone()));
+            }
             return Err(JmapError::MethodError {
                 method: "Email/set".into(),
                 error_type: err_type.into(),
@@ -125,10 +126,7 @@ pub async fn trash(
 }
 
 /// Permanently destroy emails (cannot be undone).
-pub async fn destroy(
-    client: &JmapClient,
-    email_ids: &[String],
-) -> Result<(), JmapError> {
+pub async fn destroy(client: &JmapClient, email_ids: &[String]) -> Result<(), JmapError> {
     if email_ids.is_empty() {
         return Ok(());
     }
@@ -143,11 +141,20 @@ pub async fn destroy(
 
     let resp = client.call(vec![call]).await?;
 
-    let set_resp = resp.method_responses.iter().find(|mc| mc.2 == "d0")
+    let set_resp = resp
+        .method_responses
+        .iter()
+        .find(|mc| mc.2 == "d0")
         .ok_or_else(|| JmapError::RequestError("Missing Email/set response".into()))?;
     if let Some(errors) = set_resp.1.get("notDestroyed").and_then(|v| v.as_object()) {
         if let Some((id, err)) = errors.iter().next() {
-            let err_type = err.get("type").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let err_type = err
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            if err_type == "notFound" {
+                return Err(JmapError::NotFound(id.clone()));
+            }
             return Err(JmapError::MethodError {
                 method: "Email/set".into(),
                 error_type: err_type.into(),
@@ -247,11 +254,17 @@ pub async fn search(
 
     let resp = client.call(vec![query_call, get_call]).await?;
 
-    let query_resp = resp.method_responses.iter().find(|mc| mc.2 == "sq0")
+    let query_resp = resp
+        .method_responses
+        .iter()
+        .find(|mc| mc.2 == "sq0")
         .ok_or_else(|| JmapError::RequestError("Missing search query response".into()))?;
     let query_result = parse_query_result(&query_resp.1)?;
 
-    let get_resp = resp.method_responses.iter().find(|mc| mc.2 == "sg0")
+    let get_resp = resp
+        .method_responses
+        .iter()
+        .find(|mc| mc.2 == "sg0")
         .ok_or_else(|| JmapError::RequestError("Missing search get response".into()))?;
     // Use empty string as fallback mailbox ID since search spans mailboxes
     let messages = parse_email_list(&get_resp.1, "")?;
@@ -265,13 +278,25 @@ pub fn check_set_errors(
     email_id: &str,
     call_id: &str,
 ) -> Result<(), JmapError> {
-    let set_resp = resp.method_responses.iter().find(|mc| mc.2 == call_id)
+    let set_resp = resp
+        .method_responses
+        .iter()
+        .find(|mc| mc.2 == call_id)
         .ok_or_else(|| JmapError::RequestError("Missing Email/set response".into()))?;
 
     if let Some(errors) = set_resp.1.get("notUpdated").and_then(|v| v.as_object()) {
         if let Some(err) = errors.get(email_id) {
-            let err_type = err.get("type").and_then(|v| v.as_str()).unwrap_or("unknown");
-            let desc = err.get("description").and_then(|v| v.as_str()).unwrap_or("");
+            let err_type = err
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            if err_type == "notFound" {
+                return Err(JmapError::NotFound(email_id.to_string()));
+            }
+            let desc = err
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             return Err(JmapError::MethodError {
                 method: "Email/set".into(),
                 error_type: err_type.into(),
@@ -327,7 +352,7 @@ mod tests {
     }
 
     #[test]
-    fn check_set_errors_catches_failure() {
+    fn check_set_errors_returns_not_found() {
         let resp = crate::client::JmapResponse {
             method_responses: vec![crate::client::MethodCall(
                 "Email/set".into(),
@@ -345,8 +370,33 @@ mod tests {
             session_state: None,
         };
         let err = check_set_errors(&resp, "M001", "f0").unwrap_err();
+        assert!(
+            matches!(err, JmapError::NotFound(ref id) if id == "M001"),
+            "should return NotFound variant"
+        );
+    }
+
+    #[test]
+    fn check_set_errors_returns_method_error_for_other_types() {
+        let resp = crate::client::JmapResponse {
+            method_responses: vec![crate::client::MethodCall(
+                "Email/set".into(),
+                serde_json::json!({
+                    "updated": {},
+                    "notUpdated": {
+                        "M001": {
+                            "type": "forbidden",
+                            "description": "Not allowed"
+                        }
+                    }
+                }),
+                "f0".into(),
+            )],
+            session_state: None,
+        };
+        let err = check_set_errors(&resp, "M001", "f0").unwrap_err();
         let err_str = format!("{err}");
-        assert!(err_str.contains("notFound"));
+        assert!(err_str.contains("forbidden"));
     }
 
     #[test]

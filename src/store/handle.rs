@@ -4,8 +4,7 @@ use rusqlite::Connection;
 use tokio::sync::{mpsc, oneshot};
 
 use super::commands::CacheCmd;
-use super::folder_queries;
-use super::queries;
+use super::dispatch;
 use super::schema::{run_migrations, SCHEMA};
 use crate::models::{AttachmentData, BackfillProgress, Folder, MessageSummary};
 
@@ -30,10 +29,12 @@ impl CacheHandle {
         let conn =
             Connection::open(&db_file).map_err(|e| format!("Failed to open cache db: {e}"))?;
 
-        // Enable foreign key enforcement so ON DELETE CASCADE works
-        // (e.g., pruning messages cascades to attachments).
-        conn.execute_batch("PRAGMA foreign_keys = ON;")
-            .map_err(|e| format!("Failed to enable foreign keys: {e}"))?;
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON;\
+             PRAGMA journal_mode = WAL;\
+             PRAGMA busy_timeout = 5000;",
+        )
+        .map_err(|e| format!("Failed to set cache pragmas: {e}"))?;
 
         conn.execute_batch(SCHEMA)
             .map_err(|e| format!("Failed to init cache schema: {e}"))?;
@@ -44,7 +45,7 @@ impl CacheHandle {
 
         std::thread::Builder::new()
             .name("neverlight-mail-cache".into())
-            .spawn(move || run_loop(conn, rx))
+            .spawn(move || dispatch::run_loop(conn, rx))
             .map_err(|e| format!("Failed to spawn cache thread: {e}"))?;
 
         Ok(CacheHandle { tx })
@@ -248,11 +249,7 @@ impl CacheHandle {
         rx.await.map_err(|_| "Cache unavailable".to_string())?
     }
 
-    pub async fn remove_message(
-        &self,
-        account_id: String,
-        email_id: String,
-    ) -> Result<(), String> {
+    pub async fn remove_message(&self, account_id: String, email_id: String) -> Result<(), String> {
         let (reply, rx) = oneshot::channel();
         self.tx
             .send(CacheCmd::RemoveMessage {
@@ -384,10 +381,7 @@ impl CacheHandle {
     ) -> Result<Vec<BackfillProgress>, String> {
         let (reply, rx) = oneshot::channel();
         self.tx
-            .send(CacheCmd::ListBackfillProgress {
-                account_id,
-                reply,
-            })
+            .send(CacheCmd::ListBackfillProgress { account_id, reply })
             .map_err(|_| "Cache unavailable".to_string())?;
         rx.await.map_err(|_| "Cache unavailable".to_string())?
     }
@@ -532,280 +526,4 @@ impl CacheHandle {
             .map_err(|_| "Cache unavailable".to_string())?;
         rx.await.map_err(|_| "Cache unavailable".to_string())?
     }
-}
-
-// -- background thread ---------------------------------------------------
-
-fn run_loop(conn: Connection, mut rx: mpsc::UnboundedReceiver<CacheCmd>) {
-    while let Some(cmd) = rx.blocking_recv() {
-        match cmd {
-            CacheCmd::SaveFolders {
-                account_id,
-                folders,
-                reply,
-            } => {
-                let _ = reply.send(folder_queries::do_save_folders(&conn, &account_id, &folders));
-            }
-            CacheCmd::LoadFolders { account_id, reply } => {
-                let _ = reply.send(folder_queries::do_load_folders(&conn, &account_id));
-            }
-            CacheCmd::SaveMessages {
-                account_id,
-                mailbox_id,
-                messages,
-                reply,
-            } => {
-                let _ = reply.send(queries::do_save_messages(
-                    &conn,
-                    &account_id,
-                    &mailbox_id,
-                    &messages,
-                ));
-            }
-            CacheCmd::LoadMessages {
-                account_id,
-                mailbox_id,
-                limit,
-                offset,
-                reply,
-            } => {
-                let _ = reply.send(queries::do_load_messages(
-                    &conn,
-                    &account_id,
-                    &mailbox_id,
-                    limit,
-                    offset,
-                ));
-            }
-            CacheCmd::LoadBody {
-                account_id,
-                email_id,
-                reply,
-            } => {
-                let _ = reply.send(queries::do_load_body(&conn, &account_id, &email_id));
-            }
-            CacheCmd::SaveBody {
-                account_id,
-                email_id,
-                body_markdown,
-                body_plain,
-                attachments,
-                reply,
-            } => {
-                let _ = reply.send(queries::do_save_body(
-                    &conn,
-                    &account_id,
-                    &email_id,
-                    &body_markdown,
-                    &body_plain,
-                    &attachments,
-                ));
-            }
-            CacheCmd::UpdateFlags {
-                account_id,
-                email_id,
-                flags_local,
-                pending_op,
-                reply,
-            } => {
-                let _ = reply.send(queries::do_update_flags(
-                    &conn,
-                    &account_id,
-                    &email_id,
-                    flags_local,
-                    &pending_op,
-                ));
-            }
-            CacheCmd::ClearPendingOp {
-                account_id,
-                email_id,
-                flags_server,
-                reply,
-            } => {
-                let _ = reply.send(queries::do_clear_pending_op(
-                    &conn,
-                    &account_id,
-                    &email_id,
-                    flags_server,
-                ));
-            }
-            CacheCmd::RevertPendingOp {
-                account_id,
-                email_id,
-                reply,
-            } => {
-                let _ = reply.send(queries::do_revert_pending_op(
-                    &conn,
-                    &account_id,
-                    &email_id,
-                ));
-            }
-            CacheCmd::RemoveMessage {
-                account_id,
-                email_id,
-                reply,
-            } => {
-                let _ = reply.send(queries::do_remove_message(&conn, &account_id, &email_id));
-            }
-            CacheCmd::PruneMailbox {
-                account_id,
-                mailbox_id,
-                live_email_ids,
-                reply,
-            } => {
-                let _ = reply.send(queries::do_prune_mailbox(
-                    &conn,
-                    &account_id,
-                    &mailbox_id,
-                    &live_email_ids,
-                ));
-            }
-            CacheCmd::Search {
-                account_id,
-                query,
-                reply,
-            } => {
-                let _ = reply.send(queries::do_search(&conn, &account_id, &query));
-            }
-            CacheCmd::LoadThread {
-                account_id,
-                thread_id,
-                mailbox_ids,
-                reply,
-            } => {
-                let _ = reply.send(queries::do_load_thread(
-                    &conn,
-                    &account_id,
-                    &thread_id,
-                    &mailbox_ids,
-                ));
-            }
-            CacheCmd::UpsertFolders {
-                account_id,
-                folders,
-                reply,
-            } => {
-                let _ = reply.send(folder_queries::do_upsert_folders(&conn, &account_id, &folders));
-            }
-            CacheCmd::RemoveFolders {
-                account_id,
-                mailbox_ids,
-                reply,
-            } => {
-                let _ = reply.send(folder_queries::do_remove_folders_by_id(
-                    &conn,
-                    &account_id,
-                    &mailbox_ids,
-                ));
-            }
-            CacheCmd::RemoveAccount { account_id, reply } => {
-                let _ = reply.send(folder_queries::do_remove_account(&conn, &account_id));
-            }
-            CacheCmd::GetState {
-                account_id,
-                resource,
-                reply,
-            } => {
-                let _ = reply.send(folder_queries::do_get_state(&conn, &account_id, &resource));
-            }
-            CacheCmd::SetState {
-                account_id,
-                resource,
-                state,
-                reply,
-            } => {
-                let _ = reply.send(folder_queries::do_set_state(&conn, &account_id, &resource, &state));
-            }
-            CacheCmd::GetBackfillProgress {
-                account_id,
-                mailbox_id,
-                reply,
-            } => {
-                let _ = reply.send(queries::do_get_backfill_progress(&conn, &account_id, &mailbox_id));
-            }
-            CacheCmd::SetBackfillProgress {
-                account_id,
-                mailbox_id,
-                position,
-                total,
-                completed,
-                reply,
-            } => {
-                let _ = reply.send(queries::do_set_backfill_progress(
-                    &conn, &account_id, &mailbox_id, position, total, completed,
-                ));
-            }
-            CacheCmd::ListBackfillProgress {
-                account_id,
-                reply,
-            } => {
-                let _ = reply.send(queries::do_list_backfill_progress(&conn, &account_id));
-            }
-            CacheCmd::ResetBackfillProgress {
-                account_id,
-                mailbox_id,
-                reply,
-            } => {
-                let _ = reply.send(queries::do_reset_backfill_progress(&conn, &account_id, &mailbox_id));
-            }
-            CacheCmd::SaveFoldersAndSetState {
-                account_id,
-                folders,
-                resource,
-                state,
-                reply,
-            } => {
-                let _ = reply.send(folder_queries::do_save_folders_and_set_state(
-                    &conn, &account_id, &folders, &resource, &state,
-                ));
-            }
-            CacheCmd::DeltaFoldersAndSetState {
-                account_id,
-                upsert,
-                remove_ids,
-                resource,
-                state,
-                reply,
-            } => {
-                let _ = reply.send(folder_queries::do_delta_folders_and_set_state(
-                    &conn, &account_id, &upsert, &remove_ids, &resource, &state,
-                ));
-            }
-            CacheCmd::SaveMessagesAndSetState {
-                account_id,
-                mailbox_id,
-                messages,
-                resource,
-                state,
-                populated_mailbox_id,
-                reply,
-            } => {
-                let _ = reply.send(queries::do_save_messages_and_set_state(
-                    &conn, &account_id, &mailbox_id, &messages, &resource, &state, &populated_mailbox_id,
-                ));
-            }
-            CacheCmd::DeltaEmailBatch {
-                account_id,
-                remove_ids,
-                save_groups,
-                resource,
-                state,
-                reply,
-            } => {
-                let _ = reply.send(queries::do_delta_email_batch(
-                    &conn, &account_id, &remove_ids, &save_groups, &resource, &state,
-                ));
-            }
-            CacheCmd::ExpirePendingOps {
-                account_id,
-                max_age_secs,
-                reply,
-            } => {
-                let _ = reply.send(queries::do_expire_pending_ops(
-                    &conn, &account_id, max_age_secs,
-                ));
-            }
-        }
-    }
-    log::debug!("Cache thread exiting");
 }

@@ -169,13 +169,14 @@ Create, rename, destroy mailboxes.
 
 Identity selection via `find_identity_for_address()` with wildcard domain support.
 
-### 4d. Error Recovery (Partial)
+### 4d. Error Recovery (Done)
 
-**Module:** `client.rs`, `sync.rs`
+**Module:** `client.rs`, `sync.rs`, `email/flags.rs`
 
-- `cannotCalculateChanges` → full resync (done)
-- HTTP error propagation via `JmapError` (done)
-- Retry with backoff, offline queue (not started)
+- `cannotCalculateChanges` → full resync
+- HTTP error propagation via `JmapError`
+- Retry with exponential backoff on transient transport errors (`client.rs`)
+- `NotFound` detection on flag/move/destroy — evicts ghost messages from cache when another client has deleted them
 
 ### 4e. OAuth (Done — extracted)
 

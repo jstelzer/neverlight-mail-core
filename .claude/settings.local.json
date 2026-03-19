@@ -11,7 +11,13 @@
       "Bash(grep -n \"reply_to\\\\|replyTo\" /home/mental/projects/neverlight-forge-env/neverlight-mail-macos/NeverlightMail/NeverlightMail/*.swift | head -20)",
       "Bash(grep -n \"RustVec\" /home/mental/projects/neverlight-forge-env/neverlight-mail-macos/NeverlightMail/NeverlightMail/*.swift)",
       "Bash(CARGO_LOG=cargo::core::source=trace cargo check 2>&1 | head -30)",
-      "Bash(CARGO_LOG=cargo::core=debug cargo check 2>&1 | grep -i 'html-safe' | head -20)"
+      "Bash(CARGO_LOG=cargo::core=debug cargo check 2>&1 | grep -i 'html-safe' | head -20)",
+      "Read(//Users/mental/projects/neverlight-forge-env/neverlight-mail-macos/**)",
+      "Read(//Users/mental/projects/neverlight-forge-env/**)",
+      "Bash(just all:*)",
+      "Bash(just build-ios:*)",
+      "Bash(just check:*)",
+      "Bash(wc -l src/store/*.rs)"
     ]
   }
 }

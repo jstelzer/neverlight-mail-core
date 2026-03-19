@@ -51,6 +51,8 @@ pub enum JmapError {
     },
     #[error("cannotCalculateChanges — full resync required")]
     CannotCalculateChanges,
+    #[error("Email not found on server: {0}")]
+    NotFound(String),
     #[error("JMAP request error: {0}")]
     RequestError(String),
     #[error("Cache error: {0}")]
@@ -153,7 +155,10 @@ impl JmapClient {
                 Err(e) if attempt < max_retries && is_transient_transport(&e) => {
                     log::warn!(
                         "JMAP transport error — retry {}/{} in {:?}: {}",
-                        attempt + 1, max_retries, delay, e
+                        attempt + 1,
+                        max_retries,
+                        delay,
+                        e
                     );
                     tokio::time::sleep(delay).await;
                     delay *= 2;
@@ -169,7 +174,13 @@ impl JmapClient {
                 || status == reqwest::StatusCode::SERVICE_UNAVAILABLE)
                 && attempt < max_retries
             {
-                log::warn!("JMAP HTTP {} — retry {}/{} in {:?}", status, attempt + 1, max_retries, delay);
+                log::warn!(
+                    "JMAP HTTP {} — retry {}/{} in {:?}",
+                    status,
+                    attempt + 1,
+                    max_retries,
+                    delay
+                );
                 tokio::time::sleep(delay).await;
                 delay *= 2;
                 continue;
@@ -187,19 +198,21 @@ impl JmapClient {
             // Check for method-level errors
             for mc in &jmap_resp.method_responses {
                 if mc.0 == "error" {
-                    let error_type = mc.1.get("type")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unknown")
-                        .to_string();
+                    let error_type =
+                        mc.1.get("type")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown")
+                            .to_string();
 
                     if error_type == "cannotCalculateChanges" {
                         return Err(JmapError::CannotCalculateChanges);
                     }
 
-                    let description = mc.1.get("description")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
+                    let description =
+                        mc.1.get("description")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
 
                     return Err(JmapError::MethodError {
                         method: mc.2.clone(),
@@ -217,8 +230,7 @@ impl JmapClient {
 
     /// Upload a blob (RFC 8620 §6.1). Returns the blob ID.
     pub async fn upload_blob(&self, data: &[u8], content_type: &str) -> Result<String, JmapError> {
-        let url = self.upload_url
-            .replace("{accountId}", &self.account_id);
+        let url = self.upload_url.replace("{accountId}", &self.account_id);
 
         let auth = self.auth_header().await;
         let resp = self
@@ -246,16 +258,20 @@ impl JmapClient {
 
     /// Download a blob (RFC 8620 §6.2). Returns raw bytes.
     pub async fn download_blob(&self, blob_id: &str) -> Result<Vec<u8>, JmapError> {
-        let url = self.download_url
+        let url = self
+            .download_url
             .replace("{accountId}", &self.account_id)
             .replace("{blobId}", blob_id)
             .replace("{name}", "download")
             .replace("{type}", "application/octet-stream");
 
         let auth = self.auth_header().await;
-        let resp = self.http.get(&url)
+        let resp = self
+            .http
+            .get(&url)
             .header(reqwest::header::AUTHORIZATION, &auth)
-            .send().await?;
+            .send()
+            .await?;
 
         if !resp.status().is_success() {
             return Err(JmapError::RequestError(format!(
@@ -270,7 +286,10 @@ impl JmapClient {
     /// Build a method call with the client's account ID pre-filled.
     pub fn method(&self, name: &str, mut args: Value, call_id: &str) -> MethodCall {
         if let Some(obj) = args.as_object_mut() {
-            obj.insert("accountId".to_string(), Value::String(self.account_id.clone()));
+            obj.insert(
+                "accountId".to_string(),
+                Value::String(self.account_id.clone()),
+            );
         }
         MethodCall(name.to_string(), args, call_id.to_string())
     }
@@ -293,13 +312,11 @@ mod tests {
     fn jmap_request_serializes_correctly() {
         let req = JmapRequest {
             using: vec![CAP_CORE.to_string(), CAP_MAIL.to_string()],
-            method_calls: vec![
-                MethodCall(
-                    "Mailbox/get".to_string(),
-                    serde_json::json!({"accountId": "u1234"}),
-                    "0".to_string(),
-                ),
-            ],
+            method_calls: vec![MethodCall(
+                "Mailbox/get".to_string(),
+                serde_json::json!({"accountId": "u1234"}),
+                "0".to_string(),
+            )],
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["using"][0], "urn:ietf:params:jmap:core");

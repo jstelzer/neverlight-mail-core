@@ -82,8 +82,13 @@ impl JmapSession {
                         log::warn!("Failed to persist refreshed OAuth token to keyring: {e}");
                         // Also update plaintext fallback in config file
                         if let Ok(Some(mut multi)) = crate::config::MultiAccountFileConfig::load() {
-                            if let Some(fac) = multi.accounts.iter_mut().find(|a| a.id == config.id) {
-                                if let crate::config::AuthBackend::OAuth { refresh_token_plaintext, .. } = &mut fac.auth {
+                            if let Some(fac) = multi.accounts.iter_mut().find(|a| a.id == config.id)
+                            {
+                                if let crate::config::AuthBackend::OAuth {
+                                    refresh_token_plaintext,
+                                    ..
+                                } = &mut fac.auth
+                                {
                                     *refresh_token_plaintext = Some(new_refresh.clone());
                                 }
                                 let _ = multi.save();
@@ -109,14 +114,17 @@ impl JmapSession {
     ) -> Result<(Self, JmapClient), String> {
         let (ref session, _) = pair;
         let stale_push = config.capabilities.supports_push != session.supports_push;
-        let stale_submission = config.capabilities.supports_submission != session.supports_submission;
+        let stale_submission =
+            config.capabilities.supports_submission != session.supports_submission;
 
         if stale_push || stale_submission {
             log::info!(
                 "Healing capabilities for account {}: push {}→{}, submission {}→{}",
                 config.id,
-                config.capabilities.supports_push, session.supports_push,
-                config.capabilities.supports_submission, session.supports_submission,
+                config.capabilities.supports_push,
+                session.supports_push,
+                config.capabilities.supports_submission,
+                session.supports_submission,
             );
             if let Ok(Some(mut multi)) = crate::config::MultiAccountFileConfig::load() {
                 if let Some(fac) = multi.accounts.iter_mut().find(|a| a.id == config.id) {
@@ -133,18 +141,28 @@ impl JmapSession {
     }
 
     /// Connect using a bearer token (e.g. Fastmail API token with `fmu1-` prefix).
-    pub async fn connect_with_token(session_url: &str, token: &str) -> Result<(Self, JmapClient), String> {
+    pub async fn connect_with_token(
+        session_url: &str,
+        token: &str,
+    ) -> Result<(Self, JmapClient), String> {
         let auth = format!("Bearer {token}");
         Self::connect_with_auth(session_url, &auth).await
     }
 
     /// Connect using basic auth (e.g. Fastmail app password with `mu1-` prefix).
-    pub async fn connect_with_basic(session_url: &str, username: &str, password: &str) -> Result<(Self, JmapClient), String> {
+    pub async fn connect_with_basic(
+        session_url: &str,
+        username: &str,
+        password: &str,
+    ) -> Result<(Self, JmapClient), String> {
         let auth = basic_auth(username, password);
         Self::connect_with_auth(session_url, &auth).await
     }
 
-    async fn connect_with_auth(session_url: &str, auth: &str) -> Result<(Self, JmapClient), String> {
+    async fn connect_with_auth(
+        session_url: &str,
+        auth: &str,
+    ) -> Result<(Self, JmapClient), String> {
         let http = reqwest::Client::new();
         let resp = http
             .get(session_url)
@@ -170,7 +188,8 @@ impl JmapSession {
             session.event_source_url.clone(),
             session.account_id.clone(),
             auth.to_string(),
-        ).map_err(|e| format!("Failed to build JMAP client: {e}"))?;
+        )
+        .map_err(|e| format!("Failed to build JMAP client: {e}"))?;
 
         Ok((session, client))
     }
@@ -181,7 +200,7 @@ impl JmapSession {
             .and_then(|v| v.as_object())
             .ok_or("Missing capabilities in session")?;
 
-        if !capabilities.contains_key("urn:ietf:params:jmap:mail") {
+        if !has_mail_capability(capabilities) {
             return Err("Server does not support urn:ietf:params:jmap:mail".into());
         }
 
@@ -260,10 +279,7 @@ impl JmapSession {
             .and_then(|v| v.as_u64())
             .unwrap_or(16) as u32;
 
-        let supports_push = capabilities.contains_key("urn:ietf:params:jmap:websocket")
-            || event_source_url.is_some();
-        let supports_submission =
-            capabilities.contains_key("urn:ietf:params:jmap:submission");
+        let (supports_push, supports_submission) = detect_capabilities(capabilities, json);
 
         Ok(JmapSession {
             api_url,
@@ -279,6 +295,28 @@ impl JmapSession {
             supports_submission,
         })
     }
+}
+
+/// Detect push and submission support from a JMAP session's capabilities object.
+///
+/// Shared by `session::JmapSession::parse` and `discovery::parse_session_object`
+/// so capability detection cannot drift between the two code paths.
+pub fn detect_capabilities(
+    capabilities: &serde_json::Map<String, serde_json::Value>,
+    session_json: &serde_json::Value,
+) -> (bool, bool) {
+    let supports_push = capabilities.contains_key("urn:ietf:params:jmap:websocket")
+        || session_json
+            .get("eventSourceUrl")
+            .and_then(|v| v.as_str())
+            .is_some();
+    let supports_submission = capabilities.contains_key("urn:ietf:params:jmap:submission");
+    (supports_push, supports_submission)
+}
+
+/// Check whether a capabilities object advertises JMAP Mail.
+pub fn has_mail_capability(capabilities: &serde_json::Map<String, serde_json::Value>) -> bool {
+    capabilities.contains_key("urn:ietf:params:jmap:mail")
 }
 
 fn basic_auth(username: &str, password: &str) -> String {

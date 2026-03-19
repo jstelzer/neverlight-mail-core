@@ -47,13 +47,25 @@ neverlight-mail-core/
 │   ├── models.rs           — Folder, MessageSummary, AttachmentData
 │   ├── setup.rs            — UI-agnostic setup state machine
 │   └── store/
-│       ├── mod.rs           — Re-exports (CacheHandle, flags_to_u8, DEFAULT_PAGE_SIZE)
-│       ├── schema.rs        — DDL + migrations + FTS5
-│       ├── flags.rs         — Flag encode/decode (compact 2-bit encoding)
-│       ├── commands.rs      — CacheCmd enum
-│       ├── queries.rs       — All do_* SQL functions
-│       └── handle.rs        — CacheHandle async facade + background thread
-└── tests/fixtures/          — Real email fixtures for MIME tests
+│       ├── mod.rs               — Re-exports (CacheHandle, flags_to_u8, DEFAULT_PAGE_SIZE)
+│       ├── schema.rs            — DDL + migrations + FTS5
+│       ├── flags.rs             — Flag encode/decode (compact 2-bit encoding)
+│       ├── commands.rs          — CacheCmd enum
+│       ├── handle.rs            — CacheHandle async facade
+│       ├── dispatch.rs          — Background thread run_loop
+│       ├── message_queries.rs   — Message CRUD, save/load/prune/delta
+│       ├── body_queries.rs      — Body cache load/save
+│       ├── flag_queries.rs      — Flag ops, pending-op expiry
+│       ├── search_queries.rs    — FTS search, thread loading
+│       ├── backfill_queries.rs  — Backfill progress tracking
+│       └── folder_queries.rs    — Folder CRUD, sync state, account removal
+├── tests/
+│   ├── common/mod.rs            — Shared test helpers (connect, skip macro)
+│   ├── mailbox_query_body.rs    — Session, mailbox, query, body tests
+│   ├── flags_move_delete.rs     — Flag ops, move/trash, mailbox CRUD
+│   ├── sync_push_search.rs      — Delta sync, SSE push, search, capabilities
+│   ├── send_identity.rs         — Identity fetch, email sending
+│   └── fixtures/                — Real email fixtures for MIME tests
 ```
 
 ## Key Design Decisions
@@ -80,29 +92,28 @@ See `docs/cache.md` for the full design. Summary: `CacheHandle` is a `Clone + Se
 
 ### Config resolution order
 
-`Config::resolve_all_accounts()`:
-1. Environment variables (`NEVERLIGHT_MAIL_SERVER`, etc.) → single env account
+`config::resolve_all_accounts()`:
+1. Environment variables (`NEVERLIGHT_MAIL_JMAP_TOKEN` + `NEVERLIGHT_MAIL_USER`) → single env account
 2. Config file (`~/.config/neverlight-mail/config.json`) → multi-account with keyring
 3. Returns `Err(ConfigNeedsInput)` if UI input is needed
 
+`config::resolve_all_accounts_detailed()` returns both successes and per-account failures for UIs that need targeted recovery.
+
 ## Testing
 
-Source the `.envrc` at the repo root. This defines:
-```
-NEVERLIGHT_MAIL_JMAP_TOKEN
-NEVERLIGHT_MAIL_USER
+```bash
+just check              # fmt + clippy + unit tests (162 tests)
+just test-integration   # integration tests (requires env vars)
+just test-all           # everything
 ```
 
-```bash
-cargo test -p neverlight-mail-core    # core tests only
-cargo test --workspace                # everything
-```
+Source `.envrc` at the repo root for integration tests (`NEVERLIGHT_MAIL_JMAP_TOKEN`, `NEVERLIGHT_MAIL_USER`).
 
 Tests include:
 - Unit tests for types, client serialization, session parsing, body extraction
-- Cache tests (schema, queries, FTS, multi-account isolation)
+- Cache tests split by responsibility (message, body, flag, search, backfill, folder queries)
 - MIME rendering tests with real-world email fixtures
-- Integration tests against Fastmail (require env vars above)
+- Integration tests against Fastmail split by behavior (mailbox/query/body, flags/move, sync/push/search, send/identity)
 
 ## What to Avoid
 

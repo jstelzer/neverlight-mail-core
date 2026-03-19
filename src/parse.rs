@@ -28,13 +28,9 @@ pub fn parse_body(raw: &[u8]) -> ParsedBody {
         }
     };
 
-    let text_plain = message
-        .body_text(0)
-        .map(|s| s.to_string());
+    let text_plain = message.body_text(0).map(|s| s.to_string());
 
-    let text_html = message
-        .body_html(0)
-        .map(|s| s.to_string());
+    let text_html = message.body_html(0).map(|s| s.to_string());
 
     let mut attachments = Vec::new();
     for attachment in message.attachments() {

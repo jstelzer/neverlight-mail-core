@@ -184,7 +184,7 @@ fn migrate_invalidate_body_cache(conn: &Connection) {
     if let Err(e) = conn.execute_batch(
         "UPDATE messages SET body_rendered = NULL, body_markdown = NULL;
          CREATE TABLE IF NOT EXISTS _body_cache_v2 (migrated INTEGER DEFAULT 1);
-         INSERT INTO _body_cache_v2 VALUES (1);"
+         INSERT INTO _body_cache_v2 VALUES (1);",
     ) {
         log::warn!("Body cache invalidation failed: {}", e);
     }
@@ -213,7 +213,7 @@ fn migrate_email_state_to_global(conn: &Connection) {
     if let Err(e) = conn.execute_batch(
         "DELETE FROM sync_state WHERE resource LIKE 'Email:%';
          CREATE TABLE IF NOT EXISTS _email_state_v2 (migrated INTEGER DEFAULT 1);
-         INSERT INTO _email_state_v2 VALUES (1);"
+         INSERT INTO _email_state_v2 VALUES (1);",
     ) {
         log::warn!("Email state migration failed: {}", e);
     }
@@ -266,7 +266,7 @@ fn migrate_backfill_progress(conn: &Connection) {
             completed  INTEGER NOT NULL DEFAULT 0,
             updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
             PRIMARY KEY (account_id, mailbox_id)
-        )"
+        )",
     ) {
         log::warn!("backfill_progress migration failed: {}", e);
     }
@@ -294,7 +294,7 @@ fn migrate_pending_op_at(conn: &Connection) {
         "ALTER TABLE messages ADD COLUMN pending_op_at INTEGER;
          UPDATE messages SET pending_op_at = strftime('%s', 'now') WHERE pending_op IS NOT NULL;
          CREATE TABLE IF NOT EXISTS _pending_op_at_v1 (migrated INTEGER DEFAULT 1);
-         INSERT INTO _pending_op_at_v1 VALUES (1);"
+         INSERT INTO _pending_op_at_v1 VALUES (1);",
     ) {
         log::warn!("pending_op_at migration failed: {}", e);
     }
@@ -364,22 +364,17 @@ mod tests {
                 resource TEXT NOT NULL,
                 state TEXT NOT NULL,
                 PRIMARY KEY (account_id, resource)
-            )"
-        ).expect("create sync_state");
+            )",
+        )
+        .expect("create sync_state");
 
         // Insert stale per-mailbox keys and a valid Mailbox key
-        conn.execute(
-            "INSERT INTO sync_state VALUES ('a', 'Email:mb1', 's1')",
-            [],
-        ).expect("insert Email:mb1");
-        conn.execute(
-            "INSERT INTO sync_state VALUES ('a', 'Email:mb2', 's2')",
-            [],
-        ).expect("insert Email:mb2");
-        conn.execute(
-            "INSERT INTO sync_state VALUES ('a', 'Mailbox', 's3')",
-            [],
-        ).expect("insert Mailbox");
+        conn.execute("INSERT INTO sync_state VALUES ('a', 'Email:mb1', 's1')", [])
+            .expect("insert Email:mb1");
+        conn.execute("INSERT INTO sync_state VALUES ('a', 'Email:mb2', 's2')", [])
+            .expect("insert Email:mb2");
+        conn.execute("INSERT INTO sync_state VALUES ('a', 'Mailbox', 's3')", [])
+            .expect("insert Mailbox");
 
         // Run the migration
         super::migrate_email_state_to_global(&conn);

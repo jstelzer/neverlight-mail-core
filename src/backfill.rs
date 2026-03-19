@@ -35,12 +35,9 @@ pub async fn backfill_batch(
     let progress = cache
         .get_backfill_progress(account_id.to_string(), mailbox_id.to_string())
         .await
-        .map_err(|e| JmapError::RequestError(e))?;
+        .map_err(JmapError::RequestError)?;
 
-    let position = progress
-        .as_ref()
-        .map(|p| p.position)
-        .unwrap_or(page_size);
+    let position = progress.as_ref().map(|p| p.position).unwrap_or(page_size);
 
     // Check max_messages limit
     if let Some(max) = max_messages {
@@ -55,7 +52,7 @@ pub async fn backfill_batch(
                     true,
                 )
                 .await
-                .map_err(|e| JmapError::RequestError(e))?;
+                .map_err(JmapError::RequestError)?;
             return Ok(BackfillBatchResult {
                 mailbox_id: mailbox_id.to_string(),
                 fetched: 0,
@@ -74,7 +71,10 @@ pub async fn backfill_batch(
 
     log::debug!(
         "backfill_batch: mailbox={} position={} fetched={} total={}",
-        mailbox_id, position, fetched, total
+        mailbox_id,
+        position,
+        fetched,
+        total
     );
 
     // Set account_id on all messages before caching
@@ -85,13 +85,9 @@ pub async fn backfill_batch(
     // Additive save — never prune
     if !messages.is_empty() {
         cache
-            .save_messages(
-                account_id.to_string(),
-                mailbox_id.to_string(),
-                messages,
-            )
+            .save_messages(account_id.to_string(), mailbox_id.to_string(), messages)
             .await
-            .map_err(|e| JmapError::RequestError(e))?;
+            .map_err(JmapError::RequestError)?;
     }
 
     let new_position = position + fetched;
@@ -108,7 +104,7 @@ pub async fn backfill_batch(
             completed,
         )
         .await
-        .map_err(|e| JmapError::RequestError(e))?;
+        .map_err(JmapError::RequestError)?;
 
     Ok(BackfillBatchResult {
         mailbox_id: mailbox_id.to_string(),

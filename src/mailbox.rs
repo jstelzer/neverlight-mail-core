@@ -40,9 +40,7 @@ pub async fn fetch_all(client: &JmapClient) -> Result<Vec<Folder>, JmapError> {
         .find(|mc| mc.2 == "m0")
         .and_then(|mc| mc.1.get("list"))
         .and_then(|v| v.as_array())
-        .ok_or_else(|| {
-            JmapError::RequestError("Missing list in Mailbox/get response".into())
-        })?;
+        .ok_or_else(|| JmapError::RequestError("Missing list in Mailbox/get response".into()))?;
 
     parse_mailboxes_from_list(list)
 }
@@ -72,10 +70,7 @@ pub fn parse_mailboxes_from_list(list: &[Value]) -> Result<Vec<Folder>, JmapErro
             .get("role")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
-        let sort_order = item
-            .get("sortOrder")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as u32;
+        let sort_order = item.get("sortOrder").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
         let total_emails = item
             .get("totalEmails")
             .and_then(|v| v.as_u64())
@@ -200,9 +195,7 @@ pub async fn fetch_by_ids(client: &JmapClient, ids: &[String]) -> Result<Vec<Fol
         .find(|mc| mc.2 == "mfetch0")
         .and_then(|mc| mc.1.get("list"))
         .and_then(|v| v.as_array())
-        .ok_or_else(|| {
-            JmapError::RequestError("Missing list in Mailbox/get response".into())
-        })?;
+        .ok_or_else(|| JmapError::RequestError("Missing list in Mailbox/get response".into()))?;
 
     parse_mailboxes_from_list(list)
 }
@@ -241,14 +234,23 @@ pub async fn create(
     );
 
     let resp = client.call(vec![call]).await?;
-    let mc = resp.method_responses.iter().find(|mc| mc.2 == "mc0")
+    let mc = resp
+        .method_responses
+        .iter()
+        .find(|mc| mc.2 == "mc0")
         .ok_or_else(|| JmapError::RequestError("Missing Mailbox/set response".into()))?;
 
     // Check for creation errors
     if let Some(errors) = mc.1.get("notCreated").and_then(|v| v.as_object()) {
         if let Some(err) = errors.get("mb") {
-            let err_type = err.get("type").and_then(|v| v.as_str()).unwrap_or("unknown");
-            let desc = err.get("description").and_then(|v| v.as_str()).unwrap_or("");
+            let err_type = err
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let desc = err
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             return Err(JmapError::MethodError {
                 method: "Mailbox/set".into(),
                 error_type: err_type.into(),
@@ -258,12 +260,12 @@ pub async fn create(
     }
 
     // Extract created ID
-    let created_id = mc.1
-        .get("created")
-        .and_then(|v| v.get("mb"))
-        .and_then(|v| v.get("id"))
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| JmapError::RequestError("Missing created mailbox ID".into()))?;
+    let created_id =
+        mc.1.get("created")
+            .and_then(|v| v.get("mb"))
+            .and_then(|v| v.get("id"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| JmapError::RequestError("Missing created mailbox ID".into()))?;
 
     Ok(created_id.to_string())
 }
@@ -285,13 +287,22 @@ pub async fn rename(
     );
 
     let resp = client.call(vec![call]).await?;
-    let mc = resp.method_responses.iter().find(|mc| mc.2 == "mr0")
+    let mc = resp
+        .method_responses
+        .iter()
+        .find(|mc| mc.2 == "mr0")
         .ok_or_else(|| JmapError::RequestError("Missing Mailbox/set response".into()))?;
 
     if let Some(errors) = mc.1.get("notUpdated").and_then(|v| v.as_object()) {
         if let Some(err) = errors.get(mailbox_id) {
-            let err_type = err.get("type").and_then(|v| v.as_str()).unwrap_or("unknown");
-            let desc = err.get("description").and_then(|v| v.as_str()).unwrap_or("");
+            let err_type = err
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let desc = err
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             return Err(JmapError::MethodError {
                 method: "Mailbox/set".into(),
                 error_type: err_type.into(),
@@ -323,13 +334,22 @@ pub async fn destroy(
     );
 
     let resp = client.call(vec![call]).await?;
-    let mc = resp.method_responses.iter().find(|mc| mc.2 == "md0")
+    let mc = resp
+        .method_responses
+        .iter()
+        .find(|mc| mc.2 == "md0")
         .ok_or_else(|| JmapError::RequestError("Missing Mailbox/set response".into()))?;
 
     if let Some(errors) = mc.1.get("notDestroyed").and_then(|v| v.as_object()) {
         if let Some(err) = errors.get(mailbox_id) {
-            let err_type = err.get("type").and_then(|v| v.as_str()).unwrap_or("unknown");
-            let desc = err.get("description").and_then(|v| v.as_str()).unwrap_or("");
+            let err_type = err
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let desc = err
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             return Err(JmapError::MethodError {
                 method: "Mailbox/set".into(),
                 error_type: err_type.into(),
@@ -418,7 +438,10 @@ mod tests {
 
         assert_eq!(folders.len(), 6);
 
-        let inbox = folders.iter().find(|f| f.role.as_deref() == Some("inbox")).unwrap();
+        let inbox = folders
+            .iter()
+            .find(|f| f.role.as_deref() == Some("inbox"))
+            .unwrap();
         assert_eq!(inbox.name, "Inbox");
         assert_eq!(inbox.mailbox_id, "mb-inbox");
         assert_eq!(inbox.total_count, 42);
@@ -442,11 +465,17 @@ mod tests {
         let list = sample_mailbox_list();
         let folders = parse_mailboxes_from_list(&list).unwrap();
 
-        let alpha = folders.iter().find(|f| f.mailbox_id == "mb-proj-alpha").unwrap();
+        let alpha = folders
+            .iter()
+            .find(|f| f.mailbox_id == "mb-proj-alpha")
+            .unwrap();
         assert_eq!(alpha.path, "Projects/Alpha");
         assert_eq!(alpha.name, "Alpha");
 
-        let projects = folders.iter().find(|f| f.mailbox_id == "mb-projects").unwrap();
+        let projects = folders
+            .iter()
+            .find(|f| f.mailbox_id == "mb-projects")
+            .unwrap();
         assert_eq!(projects.path, "Projects");
     }
 
@@ -455,8 +484,14 @@ mod tests {
         let list = sample_mailbox_list();
         let folders = parse_mailboxes_from_list(&list).unwrap();
 
-        assert_eq!(find_by_role(&folders, "inbox"), Some("mb-inbox".to_string()));
-        assert_eq!(find_by_role(&folders, "trash"), Some("mb-trash".to_string()));
+        assert_eq!(
+            find_by_role(&folders, "inbox"),
+            Some("mb-inbox".to_string())
+        );
+        assert_eq!(
+            find_by_role(&folders, "trash"),
+            Some("mb-trash".to_string())
+        );
         assert_eq!(find_by_role(&folders, "nonexistent"), None);
     }
 

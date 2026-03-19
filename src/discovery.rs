@@ -4,6 +4,7 @@
 //! whether a mail server supports JMAP.
 
 use crate::config::AccountCapabilities;
+use crate::session::{detect_capabilities, has_mail_capability};
 
 /// Probe a mail server for JMAP support.
 ///
@@ -54,10 +55,7 @@ async fn try_jmap_discovery(
         .map_err(|e| format!("GET {}: {}", url, e))?;
 
     if !response.status().is_success() {
-        return Err(format!(
-            "HTTP {} from /.well-known/jmap",
-            response.status()
-        ));
+        return Err(format!("HTTP {} from /.well-known/jmap", response.status()));
     }
 
     let body = response
@@ -78,15 +76,11 @@ fn parse_session_object(json: &str, domain: &str) -> Result<AccountCapabilities,
         .and_then(|v| v.as_object())
         .ok_or("missing or invalid 'capabilities' in session object")?;
 
-    if !capabilities.contains_key("urn:ietf:params:jmap:mail") {
+    if !has_mail_capability(capabilities) {
         return Err("server does not advertise urn:ietf:params:jmap:mail".into());
     }
 
-    let supports_push = capabilities.contains_key("urn:ietf:params:jmap:websocket")
-        || session.get("eventSourceUrl").and_then(|v| v.as_str()).is_some();
-
-    let supports_submission =
-        capabilities.contains_key("urn:ietf:params:jmap:submission");
+    let (supports_push, supports_submission) = detect_capabilities(capabilities, &session);
 
     let session_url = session
         .get("apiUrl")

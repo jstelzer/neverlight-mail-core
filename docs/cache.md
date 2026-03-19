@@ -175,8 +175,6 @@ These must hold at all times. Tests should prove each one.
 
 1. **No attachment-only cache eviction**: Body and attachment data are stored forever once fetched. There's no LRU or size-based eviction. The database grows monotonically until messages are pruned by sync.
 
-2. **No WAL mode**: The database doesn't explicitly enable WAL mode. Since all writes happen on one thread, this is fine, but WAL would allow concurrent reads from the async side if we ever need that.
-
 ## Resolved Simplifications
 
 These were previously known limitations, now fixed:
@@ -189,51 +187,55 @@ These were previously known limitations, now fixed:
 
 - **~~Single mailbox per message~~**: Messages now track all mailbox memberships via the `message_mailboxes` junction table. A message in both Inbox and Archive appears correctly in both folder views. Pruning removes only the junction row, not the message itself, so it remains visible in other folders. Delta sync partitions by `mailbox_ids.contains()` instead of single-field comparison.
 
+- **~~No WAL mode~~**: Cache now opens with `journal_mode=WAL` and `busy_timeout=5000` for better concurrent read/write behavior.
+
+- **~~Ghost messages after cross-client delete~~**: `JmapError::NotFound` is now detected when flag/move/destroy operations target a server-deleted message. The FFI layer evicts the stale cached copy instead of leaving a ghost.
+
 ## Test Coverage Required
 
 Each invariant above maps to tests. Here's what exists and what's missing.
 
-### Existing tests
+### Test coverage
 
-| Invariant                   | Test                                                                       | File                |
-|-----------------------------|----------------------------------------------------------------------------|---------------------|
-| Account isolation           | `messages_bodies_flags_and_removal_are_isolated_per_account`               | `queries.rs`        |
-| Account isolation (folders) | `folders_are_isolated_per_account`                                         | `folder_queries.rs` |
-| Prune correctness           | `prune_removes_stale_messages`                                             | `queries.rs`        |
-| Prune correctness           | `prune_with_empty_live_set_clears_mailbox`                                 | `queries.rs`        |
-| Prune correctness           | `prune_does_not_affect_other_mailboxes`                                    | `queries.rs`        |
-| Prune correctness           | `prune_does_not_affect_other_accounts`                                     | `queries.rs`        |
-| Prune no-op                 | `prune_noop_when_all_messages_are_live`                                    | `queries.rs`        |
-| Schema + FTS                | `schema_creates_cleanly`, `fts_triggers_work`                              | `schema.rs`         |
-| Flag round-trip             | (implicit in `messages_bodies_flags_and_removal_are_isolated_per_account`) | `queries.rs`        |
-
-### Tests added to prove invariants
-
-| Invariant                | Test                                                           | File                |
-|--------------------------|----------------------------------------------------------------|---------------------|
-| Pending-op preservation  | `pending_op_preserved_during_sync_upsert`                      | `queries.rs`        |
-| Pending-op → clear       | `clear_pending_op_applies_server_flags`                        | `queries.rs`        |
-| Pending-op → revert      | `revert_pending_op_restores_server_flags`                      | `queries.rs`        |
-| Flag round-trip          | `flag_encoding_round_trips_all_combinations`                   | `queries.rs`        |
-| Folder cascade           | `folder_removal_cascades_to_messages_and_attachments`          | `queries.rs`        |
-| FTS after update         | `fts_finds_updated_subject`                                    | `queries.rs`        |
-| FTS after delete         | `fts_removes_deleted_message`                                  | `queries.rs`        |
-| Upsert preserves body    | `upsert_preserves_cached_body`                                 | `queries.rs`        |
-| Thread loading (sort)    | `load_thread_returns_sorted_by_timestamp`                      | `queries.rs`        |
-| Thread loading (filter)  | `load_thread_filters_by_mailbox_ids`                           | `queries.rs`        |
-| Search prefix matching   | `search_prefix_matching`                                       | `queries.rs`        |
-| State get/set round-trip | `state_get_set_round_trip`                                     | `folder_queries.rs` |
-| Folder sort order        | `load_folders_sorts_inbox_first_then_by_sort_order_then_alpha` | `folder_queries.rs` |
-| Search account isolation | `search_results_are_isolated_per_account`                      | `queries.rs`        |
-| Email state migration    | `email_state_migration_cleans_stale_keys`                      | `schema.rs`         |
-| Upsert no-prune          | `upsert_folders_does_not_delete_unmentioned`                   | `folder_queries.rs` |
-| Folder remove cascade    | `remove_folders_by_id_cascades`                                | `folder_queries.rs` |
-| Folder remove isolation  | `remove_folders_by_id_does_not_affect_others`                  | `folder_queries.rs` |
-| Multi-mailbox loading    | `message_in_multiple_mailboxes_loads_from_both`                | `queries.rs`        |
-| Junction-aware prune     | `prune_removes_junction_row_not_message`                       | `queries.rs`        |
-| Delta move via junction  | `delta_sync_move_removes_junction_row`                         | `queries.rs`        |
-| Backfill CRUD            | `backfill_progress_upsert_and_read`                            | `queries.rs`        |
-| Backfill list filtering  | `list_backfill_returns_incomplete_only`                        | `queries.rs`        |
-| Backfill reset           | `reset_backfill_deletes_row`                                   | `queries.rs`        |
-| Backfill account isolation | `backfill_progress_isolated_per_account`                     | `queries.rs`        |
-| Config round-trip        | `config_round_trips_max_messages`                              | `config.rs`         |
+| Invariant                    | Test                                                            | File                  |
+|------------------------------|-----------------------------------------------------------------|-----------------------|
+| Account isolation            | `messages_bodies_flags_and_removal_are_isolated_per_account`    | `message_queries.rs`  |
+| Account isolation (folders)  | `folders_are_isolated_per_account`                              | `folder_queries.rs`   |
+| Prune correctness            | `prune_removes_stale_messages`                                  | `message_queries.rs`  |
+| Prune correctness            | `prune_with_empty_live_set_clears_mailbox`                      | `message_queries.rs`  |
+| Prune correctness            | `prune_does_not_affect_other_mailboxes`                         | `message_queries.rs`  |
+| Prune correctness            | `prune_does_not_affect_other_accounts`                          | `message_queries.rs`  |
+| Prune no-op                  | `prune_noop_when_all_messages_are_live`                         | `message_queries.rs`  |
+| Schema + FTS                 | `schema_creates_cleanly`, `fts_triggers_work`                   | `schema.rs`           |
+| Pending-op preservation      | `pending_op_preserved_during_sync_upsert`                       | `message_queries.rs`  |
+| Pending-op → clear           | `clear_pending_op_applies_server_flags`                         | `flag_queries.rs`     |
+| Pending-op → revert          | `revert_pending_op_restores_server_flags`                       | `flag_queries.rs`     |
+| Pending-op expiry            | `expire_pending_ops_reverts_old_ops`                            | `flag_queries.rs`     |
+| Pending-op expiry (fresh)    | `expire_pending_ops_preserves_fresh_ops`                        | `flag_queries.rs`     |
+| Flag round-trip              | `flag_encoding_round_trips_all_combinations`                    | `message_queries.rs`  |
+| Folder cascade               | `folder_removal_cascades_to_messages_and_attachments`           | `message_queries.rs`  |
+| FTS after update             | `fts_finds_updated_subject`                                     | `search_queries.rs`   |
+| FTS after delete             | `fts_removes_deleted_message`                                   | `search_queries.rs`   |
+| Upsert preserves body        | `upsert_preserves_cached_body`                                  | `message_queries.rs`  |
+| Thread loading (sort)        | `load_thread_returns_sorted_by_timestamp`                       | `search_queries.rs`   |
+| Thread loading (filter)      | `load_thread_filters_by_mailbox_ids`                            | `search_queries.rs`   |
+| Search prefix matching       | `search_prefix_matching`                                        | `search_queries.rs`   |
+| Search account isolation     | `search_results_are_isolated_per_account`                       | `search_queries.rs`   |
+| State get/set round-trip     | `state_get_set_round_trip`                                      | `folder_queries.rs`   |
+| Folder sort order            | `load_folders_sorts_inbox_first_then_by_sort_order_then_alpha`  | `folder_queries.rs`   |
+| Email state migration        | `email_state_migration_cleans_stale_keys`                       | `schema.rs`           |
+| Upsert no-prune              | `upsert_folders_does_not_delete_unmentioned`                    | `folder_queries.rs`   |
+| Folder remove cascade        | `remove_folders_by_id_cascades`                                 | `folder_queries.rs`   |
+| Folder remove isolation      | `remove_folders_by_id_does_not_affect_others`                   | `folder_queries.rs`   |
+| Multi-mailbox loading        | `message_in_multiple_mailboxes_loads_from_both`                 | `message_queries.rs`  |
+| Junction-aware prune         | `prune_removes_junction_row_not_message`                        | `message_queries.rs`  |
+| Delta move via junction      | `delta_sync_move_removes_junction_row`                          | `message_queries.rs`  |
+| Cross-mailbox delta          | `delta_batch_saves_cross_mailbox_messages`                      | `message_queries.rs`  |
+| Atomic save+state            | `save_messages_and_set_state_is_atomic`                         | `message_queries.rs`  |
+| Atomic delta batch           | `delta_email_batch_removes_and_saves_atomically`                | `message_queries.rs`  |
+| Backfill CRUD                | `backfill_progress_upsert_and_read`                             | `backfill_queries.rs` |
+| Backfill list filtering      | `list_backfill_returns_incomplete_only`                         | `backfill_queries.rs` |
+| Backfill reset               | `reset_backfill_deletes_row`                                    | `backfill_queries.rs` |
+| Backfill account isolation   | `backfill_progress_isolated_per_account`                        | `backfill_queries.rs` |
+| NotFound detection           | `check_set_errors_returns_not_found`                            | `email/flags.rs`      |
+| Config round-trip            | `config_round_trips_max_messages`                               | `config.rs`           |

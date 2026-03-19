@@ -74,14 +74,9 @@ pub async fn get_body(
     let raw = client.download_blob(blob_id).await?;
     let parsed = parse::parse_body(&raw);
 
-    let markdown = mime::render_body_markdown(
-        parsed.text_plain.as_deref(),
-        parsed.text_html.as_deref(),
-    );
-    let plain = mime::render_body(
-        parsed.text_plain.as_deref(),
-        parsed.text_html.as_deref(),
-    );
+    let markdown =
+        mime::render_body_markdown(parsed.text_plain.as_deref(), parsed.text_html.as_deref());
+    let plain = mime::render_body(parsed.text_plain.as_deref(), parsed.text_html.as_deref());
 
     // Merge parsed attachments with any blob-based ones we got
     let mut all_attachments = extract_attachments(client, email).await;
@@ -114,7 +109,11 @@ fn extract_body_value(
         let Some(part_id) = part.get("partId").and_then(|v| v.as_str()) else {
             continue;
         };
-        let Some(value) = values.get(part_id).and_then(|v| v.get("value")).and_then(|v| v.as_str()) else {
+        let Some(value) = values
+            .get(part_id)
+            .and_then(|v| v.get("value"))
+            .and_then(|v| v.as_str())
+        else {
             continue;
         };
         if !value.is_empty() {
@@ -136,10 +135,7 @@ fn extract_body_value(
 ///
 /// Individual blob download failures are logged and skipped rather than
 /// aborting the entire body fetch.
-async fn extract_attachments(
-    client: &JmapClient,
-    email: &Value,
-) -> Vec<AttachmentData> {
+async fn extract_attachments(client: &JmapClient, email: &Value) -> Vec<AttachmentData> {
     let body_values = email.get("bodyValues").and_then(|v| v.as_object());
     let mut result = Vec::new();
     let mut seen_blobs = std::collections::HashSet::new();
@@ -255,7 +251,10 @@ mod tests {
         let plain = extract_body_value(body_values, text_body, "text/plain");
         let html = extract_body_value(body_values, html_body, "text/html");
 
-        assert_eq!(plain.as_deref(), Some("Hello, this is the plain text body."));
+        assert_eq!(
+            plain.as_deref(),
+            Some("Hello, this is the plain text body.")
+        );
         assert!(html.unwrap().contains("<strong>HTML</strong>"));
     }
 
@@ -286,7 +285,11 @@ mod tests {
         let html = extract_body_value(body_values, html_body, "text/html");
 
         // text_plain must be None — the part is text/html, not text/plain
-        assert!(plain.is_none(), "HTML part leaked into text_plain: {:?}", plain);
+        assert!(
+            plain.is_none(),
+            "HTML part leaked into text_plain: {:?}",
+            plain
+        );
         // text_html should have the content
         assert!(html.is_some());
         assert!(html.unwrap().contains("Hello"));

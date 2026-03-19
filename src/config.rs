@@ -218,6 +218,26 @@ pub enum ConfigNeedsInput {
     },
 }
 
+/// Per-account resolution failure — enough context for the UI to guide the fix.
+#[derive(Debug, Clone)]
+pub struct AccountResolutionError {
+    pub account_id: AccountId,
+    pub label: String,
+    pub jmap_url: String,
+    pub username: String,
+    pub auth_backend: String,
+    pub error: String,
+}
+
+/// Result of resolving all accounts, including partial failures.
+#[derive(Debug)]
+pub struct AccountResolution {
+    /// Successfully resolved accounts.
+    pub accounts: Vec<AccountConfig>,
+    /// Accounts that failed to resolve, with per-account error details.
+    pub failures: Vec<AccountResolutionError>,
+}
+
 // ---------------------------------------------------------------------------
 // File paths
 // ---------------------------------------------------------------------------
@@ -275,7 +295,7 @@ impl LayoutConfig {
             let _ = fs::create_dir_all(parent);
         }
         if let Ok(data) = serde_json::to_string_pretty(self) {
-            let _ = fs::write(&path, data);
+            let _ = atomic_write(&path, data.as_bytes());
         }
     }
 }
@@ -306,7 +326,7 @@ impl MultiAccountFileConfig {
         }
         let data =
             serde_json::to_string_pretty(self).map_err(|e| format!("serialize config: {e}"))?;
-        fs::write(&path, data).map_err(|e| format!("write config: {e}"))
+        atomic_write(&path, data.as_bytes())
     }
 }
 
@@ -321,51 +341,88 @@ impl MultiAccountFileConfig {
 /// 2. Config file (`~/.config/neverlight-mail/config.json`) → multi-account with keyring
 /// 3. Returns `Err(ConfigNeedsInput)` if UI input is needed
 pub fn resolve_all_accounts() -> Result<Vec<AccountConfig>, ConfigNeedsInput> {
+    let result = resolve_all_accounts_detailed();
+    if !result.accounts.is_empty() {
+        return Ok(result.accounts);
+    }
+    // All accounts failed — pick the most useful error for the UI
+    if let Some(f) = result.failures.first() {
+        if f.auth_backend == "oauth"
+            && (f.error.contains("invalid_grant") || f.error.contains("OAuth token refresh failed"))
+        {
+            return Err(ConfigNeedsInput::OAuthReauth {
+                account_id: f.account_id.clone(),
+                label: f.label.clone(),
+                jmap_url: f.jmap_url.clone(),
+                username: f.username.clone(),
+                error: f.error.clone(),
+            });
+        }
+        return Err(ConfigNeedsInput::TokenOnly {
+            account_id: f.account_id.clone(),
+            jmap_url: f.jmap_url.clone(),
+            username: f.username.clone(),
+            error: Some(f.error.clone()),
+        });
+    }
+    Err(ConfigNeedsInput::FullSetup)
+}
+
+/// Resolve all accounts, returning both successes and per-account failures.
+///
+/// Unlike `resolve_all_accounts`, this never returns `Err` — the caller gets
+/// full visibility into which accounts resolved and which failed, and can
+/// present targeted recovery UI per account.
+pub fn resolve_all_accounts_detailed() -> AccountResolution {
     // 1. Env vars → single env account (JMAP token + user)
     if let Some(account) = account_from_env() {
         log::info!("Config loaded from environment variables");
-        return Ok(vec![account]);
+        return AccountResolution {
+            accounts: vec![account],
+            failures: Vec::new(),
+        };
     }
 
     // 2. Config file
     match MultiAccountFileConfig::load() {
         Ok(Some(multi)) => {
             let mut accounts = Vec::new();
+            let mut failures = Vec::new();
             for fac in &multi.accounts {
                 match resolve_account(fac) {
-                    Ok(config) => {
-                        accounts.push(config);
-                    }
+                    Ok(config) => accounts.push(config),
                     Err(e) => {
                         log::warn!(
                             "Failed to resolve credentials for account '{}': {}",
                             fac.label,
-                            e
+                            e,
                         );
+                        failures.push(AccountResolutionError {
+                            account_id: fac.id.clone(),
+                            label: fac.label.clone(),
+                            jmap_url: fac.jmap_url.clone(),
+                            username: fac.username.clone(),
+                            auth_backend: auth_backend_name(&fac.auth),
+                            error: e,
+                        });
                     }
                 }
             }
-            if accounts.is_empty() && !multi.accounts.is_empty() {
-                let fac = &multi.accounts[0];
-                return Err(ConfigNeedsInput::TokenOnly {
-                    account_id: fac.id.clone(),
-                    jmap_url: fac.jmap_url.clone(),
-                    username: fac.username.clone(),
-                    error: Some("Keyring unavailable for all accounts".into()),
-                });
-            }
-            if accounts.is_empty() {
-                return Err(ConfigNeedsInput::FullSetup);
-            }
-            Ok(accounts)
+            AccountResolution { accounts, failures }
         }
         Ok(None) => {
             log::info!("No config file found, need full setup");
-            Err(ConfigNeedsInput::FullSetup)
+            AccountResolution {
+                accounts: Vec::new(),
+                failures: Vec::new(),
+            }
         }
         Err(e) => {
             log::warn!("Config file error: {}", e);
-            Err(ConfigNeedsInput::FullSetup)
+            AccountResolution {
+                accounts: Vec::new(),
+                failures: Vec::new(),
+            }
         }
     }
 }
@@ -393,6 +450,25 @@ fn account_from_env() -> Option<AccountConfig> {
 // Helpers
 // ---------------------------------------------------------------------------
 
+fn auth_backend_name(backend: &AuthBackend) -> String {
+    match backend {
+        AuthBackend::Keyring => "keyring".into(),
+        AuthBackend::Plaintext { .. } => "plaintext".into(),
+        AuthBackend::OAuth { .. } => "oauth".into(),
+    }
+}
+
+/// Write data to a temp file then atomically rename into place.
+/// Prevents truncation/corruption on crash or concurrent access.
+fn atomic_write(path: &std::path::Path, data: &[u8]) -> Result<(), String> {
+    let tmp = path.with_extension("tmp");
+    fs::write(&tmp, data).map_err(|e| format!("write temp file: {e}"))?;
+    fs::rename(&tmp, path).map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        format!("rename config: {e}")
+    })
+}
+
 /// Resolve a FileAccountConfig into a runtime AccountConfig.
 fn resolve_account(fac: &FileAccountConfig) -> Result<AccountConfig, String> {
     match &fac.auth {
@@ -411,12 +487,11 @@ fn resolve_account(fac: &FileAccountConfig) -> Result<AccountConfig, String> {
             refresh_token_plaintext,
         } => {
             // Try keyring first, fall back to plaintext
-            let refresh_token = keyring::get_oauth_refresh(&fac.id)
-                .or_else(|_| {
-                    refresh_token_plaintext
-                        .clone()
-                        .ok_or_else(|| "No refresh token in keyring or config".to_string())
-                })?;
+            let refresh_token = keyring::get_oauth_refresh(&fac.id).or_else(|_| {
+                refresh_token_plaintext
+                    .clone()
+                    .ok_or_else(|| "No refresh token in keyring or config".to_string())
+            })?;
             Ok(AccountConfig::from_file_account_oauth(
                 fac,
                 issuer.clone(),
@@ -438,9 +513,7 @@ pub fn resolve_token(
     match backend {
         AuthBackend::Plaintext { value } => Ok(value.clone()),
         AuthBackend::Keyring => keyring::get_password(username, jmap_url),
-        AuthBackend::OAuth { .. } => {
-            Err("Cannot resolve app password from OAuth backend".into())
-        }
+        AuthBackend::OAuth { .. } => Err("Cannot resolve app password from OAuth backend".into()),
     }
 }
 
