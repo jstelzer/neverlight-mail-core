@@ -123,10 +123,9 @@ pub(super) fn run_migrations(conn: &Connection) {
         }
     }
 
-    // Rebuild FTS index from existing content
-    if let Err(e) = conn.execute("INSERT INTO message_fts(message_fts) VALUES('rebuild')", []) {
-        log::warn!("FTS5 rebuild failed: {}", e);
-    }
+    // One-shot FTS rebuild after initial trigger creation.
+    // Subsequent startups skip this — the triggers keep the index in sync.
+    migrate_fts_rebuild(conn);
 
     // Invalidate cached rendered bodies so they re-render through the updated
     // html-safe-md pipeline. Only runs once: skips if bodies are already NULL.
@@ -145,6 +144,32 @@ pub(super) fn run_migrations(conn: &Connection) {
 
     // Pending-op expiry timestamp column.
     migrate_pending_op_at(conn);
+}
+
+/// One-shot FTS5 index rebuild. Runs once after triggers are created to
+/// populate the index from existing messages. Subsequent startups skip this
+/// since the insert/update/delete triggers keep the index in sync.
+fn migrate_fts_rebuild(conn: &Connection) {
+    let already_done: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='_fts_rebuild_v1')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+
+    if already_done {
+        return;
+    }
+
+    log::info!("Rebuilding FTS5 index from existing content (one-time)");
+    if let Err(e) = conn.execute_batch(
+        "INSERT INTO message_fts(message_fts) VALUES('rebuild');
+         CREATE TABLE IF NOT EXISTS _fts_rebuild_v1 (migrated INTEGER DEFAULT 1);
+         INSERT INTO _fts_rebuild_v1 VALUES (1);",
+    ) {
+        log::warn!("FTS5 rebuild migration failed: {}", e);
+    }
 }
 
 /// One-shot migration: NULL out cached body columns to force re-rendering.

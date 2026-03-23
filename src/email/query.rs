@@ -336,7 +336,9 @@ fn parse_rfc3339_timestamp(s: &str) -> i64 {
 }
 
 fn parse_rfc3339_simple(s: &str) -> Option<i64> {
-    if s.len() < 19 {
+    // RFC 3339 is always ASCII ("2026-01-15T10:30:00Z"). Reject non-ASCII
+    // early to avoid panics from byte slicing on multi-byte strings.
+    if !s.is_ascii() || s.len() < 19 {
         return None;
     }
 
@@ -346,6 +348,11 @@ fn parse_rfc3339_simple(s: &str) -> Option<i64> {
     let hour: i64 = s[11..13].parse().ok()?;
     let min: i64 = s[14..16].parse().ok()?;
     let sec: i64 = s[17..19].parse().ok()?;
+
+    // Validate month range before indexing
+    if !(1..=12).contains(&month) {
+        return None;
+    }
 
     // Approximate days from epoch (good enough for sorting)
     let days = (year - 1970) * 365 + (year - 1969) / 4 - (year - 1901) / 100 + (year - 1601) / 400;
@@ -371,11 +378,11 @@ fn parse_tz_offset(s: &str) -> i64 {
     if s.is_empty() || s == "Z" || s == "z" {
         return 0;
     }
-    let sign: i64 = if s.starts_with('-') { -1 } else { 1 };
-    let s = &s[1..]; // skip +/-
-    if s.len() < 5 {
+    if !s.is_ascii() || s.len() < 6 {
         return 0;
     }
+    let sign: i64 = if s.starts_with('-') { -1 } else { 1 };
+    let s = &s[1..]; // skip +/- (safe: verified ASCII above)
     let oh: i64 = s[0..2].parse().unwrap_or(0);
     let om: i64 = s[3..5].parse().unwrap_or(0);
     sign * (oh * 3600 + om * 60)
@@ -515,6 +522,27 @@ mod tests {
     fn rfc3339_invalid_returns_zero() {
         assert_eq!(parse_rfc3339_timestamp(""), 0);
         assert_eq!(parse_rfc3339_timestamp("not-a-date"), 0);
+    }
+
+    #[test]
+    fn rfc3339_multibyte_utf8_does_not_panic() {
+        // 19+ bytes but not ASCII — must not panic on byte slicing
+        assert_eq!(parse_rfc3339_timestamp("日本語テスト文字列ですよ"), 0);
+        assert_eq!(parse_rfc3339_timestamp("2026-01-15T10:30:00Ü"), 0);
+        assert_eq!(parse_rfc3339_timestamp("2026—01—15T10:30:00Z"), 0); // em-dashes
+    }
+
+    #[test]
+    fn rfc3339_invalid_month_returns_zero() {
+        assert_eq!(parse_rfc3339_timestamp("2026-00-15T10:30:00Z"), 0);
+        assert_eq!(parse_rfc3339_timestamp("2026-13-15T10:30:00Z"), 0);
+        assert_eq!(parse_rfc3339_timestamp("2026-99-15T10:30:00Z"), 0);
+    }
+
+    #[test]
+    fn tz_offset_multibyte_does_not_panic() {
+        assert_eq!(parse_tz_offset("+日本:00"), 0);
+        assert_eq!(parse_tz_offset("Ü"), 0);
     }
 
     #[test]
