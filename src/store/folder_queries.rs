@@ -14,9 +14,9 @@ fn save_folders_in_tx(
         .prepare(
             "INSERT INTO folders (account_id, path, name, mailbox_id, role, sort_order, unread_count, total_count)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-             ON CONFLICT(account_id, path) DO UPDATE SET
+             ON CONFLICT(account_id, mailbox_id) DO UPDATE SET
+                 path = excluded.path,
                  name = excluded.name,
-                 mailbox_id = excluded.mailbox_id,
                  role = excluded.role,
                  sort_order = excluded.sort_order,
                  unread_count = excluded.unread_count,
@@ -191,9 +191,9 @@ fn upsert_folders_in_tx(
         .prepare(
             "INSERT INTO folders (account_id, path, name, mailbox_id, role, sort_order, unread_count, total_count)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-             ON CONFLICT(account_id, path) DO UPDATE SET
+             ON CONFLICT(account_id, mailbox_id) DO UPDATE SET
+                 path = excluded.path,
                  name = excluded.name,
-                 mailbox_id = excluded.mailbox_id,
                  role = excluded.role,
                  sort_order = excluded.sort_order,
                  unread_count = excluded.unread_count,
@@ -660,6 +660,25 @@ mod tests {
         let names: Vec<&str> = folders.iter().map(|f| f.name.as_str()).collect();
         assert!(names.contains(&"Alpha"));
         assert!(names.contains(&"Beta"));
+    }
+
+    #[test]
+    fn save_folders_updates_existing_mailbox_when_path_changes() {
+        let conn = setup_conn();
+
+        do_save_folders(&conn, "a", &[sample_folder_named("mb1", "Projects/Alpha")]).expect("save");
+        do_save_folders(
+            &conn,
+            "a",
+            &[sample_folder_named("mb1", "Projects/Renamed")],
+        )
+        .expect("rename save");
+
+        let folders = do_load_folders(&conn, "a").expect("load");
+        assert_eq!(folders.len(), 1);
+        assert_eq!(folders[0].mailbox_id, "mb1");
+        assert_eq!(folders[0].path, "Projects/Renamed");
+        assert_eq!(folders[0].name, "Projects/Renamed");
     }
 
     #[test]

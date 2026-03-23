@@ -179,25 +179,14 @@ pub async fn fetch_by_ids(client: &JmapClient, ids: &[String]) -> Result<Vec<Fol
         return Ok(Vec::new());
     }
 
-    let call = client.method(
-        "Mailbox/get",
-        serde_json::json!({
-            "ids": ids,
-            "properties": MAILBOX_PROPERTIES,
-        }),
-        "mfetch0",
-    );
-
-    let resp = client.call(vec![call]).await?;
-    let list = resp
-        .method_responses
-        .iter()
-        .find(|mc| mc.2 == "mfetch0")
-        .and_then(|mc| mc.1.get("list"))
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| JmapError::RequestError("Missing list in Mailbox/get response".into()))?;
-
-    parse_mailboxes_from_list(list)
+    // Path reconstruction needs the full ancestor chain. Fetch the full mailbox
+    // list, build paths once, then keep only the requested IDs.
+    let id_set: std::collections::HashSet<&str> = ids.iter().map(|id| id.as_str()).collect();
+    let all = fetch_all(client).await?;
+    Ok(all
+        .into_iter()
+        .filter(|folder| id_set.contains(folder.mailbox_id.as_str()))
+        .collect())
 }
 
 /// Find the mailbox ID for a given role (e.g. "inbox", "drafts", "trash").
@@ -517,5 +506,19 @@ mod tests {
         assert!(folders[0].role.is_none());
         assert_eq!(folders[0].sort_order, 0);
         assert_eq!(folders[0].total_count, 0);
+    }
+
+    #[test]
+    fn filtering_changed_mailboxes_preserves_full_path_context() {
+        let list = sample_mailbox_list();
+        let folders = parse_mailboxes_from_list(&list).unwrap();
+
+        let changed: Vec<Folder> = folders
+            .into_iter()
+            .filter(|f| f.mailbox_id == "mb-proj-alpha")
+            .collect();
+
+        assert_eq!(changed.len(), 1);
+        assert_eq!(changed[0].path, "Projects/Alpha");
     }
 }

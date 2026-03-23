@@ -67,6 +67,7 @@ pub enum JmapError {
 pub struct JmapClient {
     pub(crate) http: reqwest::Client,
     auth: Arc<RwLock<String>>,
+    using_capabilities: Arc<Vec<String>>,
     pub api_url: String,
     pub upload_url: String,
     pub download_url: String,
@@ -87,6 +88,7 @@ impl JmapClient {
         event_source_url: Option<String>,
         account_id: String,
         auth_header: String,
+        supports_submission: bool,
     ) -> Result<Self, JmapError> {
         // Validate the auth header value is usable
         reqwest::header::HeaderValue::from_str(&auth_header)
@@ -106,6 +108,7 @@ impl JmapClient {
         Ok(JmapClient {
             http,
             auth: Arc::new(RwLock::new(auth_header)),
+            using_capabilities: Arc::new(using_capabilities(supports_submission)),
             api_url,
             upload_url,
             download_url,
@@ -130,11 +133,7 @@ impl JmapClient {
     /// with exponential backoff (1s, 2s, 4s — max 3 retries).
     pub async fn call(&self, method_calls: Vec<MethodCall>) -> Result<JmapResponse, JmapError> {
         let request = JmapRequest {
-            using: vec![
-                CAP_CORE.to_string(),
-                CAP_MAIL.to_string(),
-                CAP_SUBMISSION.to_string(),
-            ],
+            using: self.using_capabilities.as_ref().clone(),
             method_calls,
         };
 
@@ -304,6 +303,14 @@ impl JmapClient {
     }
 }
 
+fn using_capabilities(supports_submission: bool) -> Vec<String> {
+    let mut using = vec![CAP_CORE.to_string(), CAP_MAIL.to_string()];
+    if supports_submission {
+        using.push(CAP_SUBMISSION.to_string());
+    }
+    using
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -344,5 +351,24 @@ mod tests {
         assert_eq!(r["resultOf"], "0");
         assert_eq!(r["name"], "Email/query");
         assert_eq!(r["path"], "/ids");
+    }
+
+    #[test]
+    fn using_capabilities_omits_submission_when_unsupported() {
+        let using = using_capabilities(false);
+        assert_eq!(using, vec![CAP_CORE.to_string(), CAP_MAIL.to_string()]);
+    }
+
+    #[test]
+    fn using_capabilities_includes_submission_when_supported() {
+        let using = using_capabilities(true);
+        assert_eq!(
+            using,
+            vec![
+                CAP_CORE.to_string(),
+                CAP_MAIL.to_string(),
+                CAP_SUBMISSION.to_string()
+            ]
+        );
     }
 }
