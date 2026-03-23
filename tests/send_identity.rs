@@ -52,6 +52,7 @@ async fn send_test_email() {
         sent_mailbox_id: &sent_id,
         in_reply_to: None,
         references: None,
+        attachments: &[],
     };
 
     let email_id = submit::send(&client, &req).await.expect("send failed");
@@ -101,6 +102,7 @@ async fn send_to_external_address() {
         sent_mailbox_id: &sent_id,
         in_reply_to: None,
         references: None,
+        attachments: &[],
     };
 
     eprintln!("Sending: from={}, to={:?}", from_addr, to);

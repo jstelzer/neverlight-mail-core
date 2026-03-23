@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::client::{JmapClient, JmapError};
+use crate::models::AttachmentData;
 
 /// A sender identity from Identity/get.
 ///
@@ -89,6 +90,14 @@ pub fn find_identity_for_address<'a>(
     identities.first()
 }
 
+/// An attachment whose blob has already been uploaded to the JMAP server.
+pub struct UploadedAttachment {
+    pub blob_id: String,
+    pub filename: String,
+    pub mime_type: String,
+    pub size: usize,
+}
+
 /// Parameters for sending an email.
 pub struct SendRequest<'a> {
     pub identity_id: &'a str,
@@ -104,12 +113,18 @@ pub struct SendRequest<'a> {
     pub in_reply_to: Option<&'a str>,
     /// Space-separated RFC 5322 Message-ID chain (for threading).
     pub references: Option<&'a str>,
+    /// Pre-uploaded attachments (blob IDs resolved before calling send).
+    pub attachments: &'a [UploadedAttachment],
 }
 
 /// Build the Email/set create object for a draft.
 ///
 /// Separated from `send()` so the exact JSON payload is unit-testable
 /// without a live server.
+///
+/// When attachments are present, builds a `multipart/mixed` structure:
+/// the text body (and optional HTML body) as inline parts, followed by
+/// attachment parts referencing pre-uploaded blob IDs (RFC 8621 §4.1.4).
 fn build_draft_create(req: &SendRequest<'_>) -> Value {
     let to_addrs: Vec<Value> = req
         .to
@@ -140,6 +155,24 @@ fn build_draft_create(req: &SendRequest<'_>) -> Value {
     if let Some(html) = req.html_body {
         email_create["bodyValues"]["html"] = serde_json::json!({ "value": html });
         email_create["htmlBody"] = serde_json::json!([{ "partId": "html", "type": "text/html" }]);
+    }
+
+    // Attachments: each references a pre-uploaded blobId (RFC 8621 §4.1.4).
+    if !req.attachments.is_empty() {
+        let att_parts: Vec<Value> = req
+            .attachments
+            .iter()
+            .map(|att| {
+                serde_json::json!({
+                    "blobId": att.blob_id,
+                    "type": att.mime_type,
+                    "name": att.filename,
+                    "disposition": "attachment",
+                    "size": att.size,
+                })
+            })
+            .collect();
+        email_create["attachments"] = Value::Array(att_parts);
     }
 
     // Threading headers (RFC 8621 §4.1.4: inReplyTo and references are String[] arrays).
@@ -184,6 +217,31 @@ fn build_on_success_patch(req: &SendRequest<'_>) -> Value {
         "keywords/$draft": null,
         "keywords/$seen": true,
     })
+}
+
+/// Upload attachments to the JMAP blob store, returning metadata with blob IDs.
+pub async fn upload_attachments(
+    client: &JmapClient,
+    attachments: &[AttachmentData],
+) -> Result<Vec<UploadedAttachment>, JmapError> {
+    let mut uploaded = Vec::with_capacity(attachments.len());
+    for att in attachments {
+        let blob_id = client.upload_blob(&att.data, &att.mime_type).await?;
+        log::debug!(
+            "Uploaded attachment '{}' ({}, {} bytes) → blobId={}",
+            att.filename,
+            att.mime_type,
+            att.data.len(),
+            blob_id,
+        );
+        uploaded.push(UploadedAttachment {
+            blob_id,
+            filename: att.filename.clone(),
+            mime_type: att.mime_type.clone(),
+            size: att.data.len(),
+        });
+    }
+    Ok(uploaded)
 }
 
 /// Send an email using a single batched request:
@@ -354,6 +412,7 @@ mod tests {
             sent_mailbox_id: "mb-sent",
             in_reply_to: None,
             references: None,
+            attachments: &[],
         }
     }
 
@@ -647,5 +706,109 @@ mod tests {
     #[test]
     fn identity_empty_list_returns_none() {
         assert!(find_identity_for_address(&[], "foo@bar.com").is_none());
+    }
+
+    // -- Draft payload: attachments --
+
+    #[test]
+    fn draft_without_attachments_omits_attachments_field() {
+        let to = vec!["bob@example.com".to_string()];
+        let req = SendRequest {
+            to: &to,
+            ..sample_request()
+        };
+        let draft = build_draft_create(&req);
+        assert!(
+            draft.get("attachments").is_none(),
+            "attachments should be omitted when empty"
+        );
+    }
+
+    #[test]
+    fn draft_with_one_attachment() {
+        let to = vec!["bob@example.com".to_string()];
+        let atts = vec![UploadedAttachment {
+            blob_id: "B1234".into(),
+            filename: "report.pdf".into(),
+            mime_type: "application/pdf".into(),
+            size: 42000,
+        }];
+        let req = SendRequest {
+            to: &to,
+            attachments: &atts,
+            ..sample_request()
+        };
+        let draft = build_draft_create(&req);
+
+        // textBody still present
+        assert_eq!(draft["textBody"][0]["partId"], "text");
+
+        // attachments array present with one entry
+        let att_arr = draft["attachments"].as_array().unwrap();
+        assert_eq!(att_arr.len(), 1);
+        assert_eq!(att_arr[0]["blobId"], "B1234");
+        assert_eq!(att_arr[0]["type"], "application/pdf");
+        assert_eq!(att_arr[0]["name"], "report.pdf");
+        assert_eq!(att_arr[0]["disposition"], "attachment");
+        assert_eq!(att_arr[0]["size"], 42000);
+    }
+
+    #[test]
+    fn draft_with_multiple_attachments() {
+        let to = vec!["bob@example.com".to_string()];
+        let atts = vec![
+            UploadedAttachment {
+                blob_id: "B1".into(),
+                filename: "photo.jpg".into(),
+                mime_type: "image/jpeg".into(),
+                size: 150000,
+            },
+            UploadedAttachment {
+                blob_id: "B2".into(),
+                filename: "doc.pdf".into(),
+                mime_type: "application/pdf".into(),
+                size: 8000,
+            },
+        ];
+        let req = SendRequest {
+            to: &to,
+            attachments: &atts,
+            ..sample_request()
+        };
+        let draft = build_draft_create(&req);
+
+        let att_arr = draft["attachments"].as_array().unwrap();
+        assert_eq!(att_arr.len(), 2);
+        assert_eq!(att_arr[0]["blobId"], "B1");
+        assert_eq!(att_arr[0]["name"], "photo.jpg");
+        assert_eq!(att_arr[1]["blobId"], "B2");
+        assert_eq!(att_arr[1]["name"], "doc.pdf");
+    }
+
+    #[test]
+    fn draft_with_attachments_and_html() {
+        let to = vec!["bob@example.com".to_string()];
+        let atts = vec![UploadedAttachment {
+            blob_id: "B99".into(),
+            filename: "data.csv".into(),
+            mime_type: "text/csv".into(),
+            size: 500,
+        }];
+        let req = SendRequest {
+            to: &to,
+            html_body: Some("<p>See attached</p>"),
+            attachments: &atts,
+            ..sample_request()
+        };
+        let draft = build_draft_create(&req);
+
+        // Both text and html body parts
+        assert_eq!(draft["textBody"][0]["partId"], "text");
+        assert_eq!(draft["htmlBody"][0]["partId"], "html");
+
+        // Attachments also present
+        let att_arr = draft["attachments"].as_array().unwrap();
+        assert_eq!(att_arr.len(), 1);
+        assert_eq!(att_arr[0]["blobId"], "B99");
     }
 }
