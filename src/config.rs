@@ -341,15 +341,16 @@ impl MultiAccountFileConfig {
 /// 2. Config file (`~/.config/neverlight-mail/config.json`) → multi-account with keyring
 /// 3. Returns `Err(ConfigNeedsInput)` if UI input is needed
 pub fn resolve_all_accounts() -> Result<Vec<AccountConfig>, ConfigNeedsInput> {
-    let result = resolve_all_accounts_detailed();
+    accounts_or_input(resolve_all_accounts_detailed())
+}
+
+fn accounts_or_input(result: AccountResolution) -> Result<Vec<AccountConfig>, ConfigNeedsInput> {
     if !result.accounts.is_empty() {
         return Ok(result.accounts);
     }
     // All accounts failed — pick the most useful error for the UI
     if let Some(f) = result.failures.first() {
-        if f.auth_backend == "oauth"
-            && (f.error.contains("invalid_grant") || f.error.contains("OAuth token refresh failed"))
-        {
+        if f.auth_backend == "oauth" {
             return Err(ConfigNeedsInput::OAuthReauth {
                 account_id: f.account_id.clone(),
                 label: f.label.clone(),
@@ -520,6 +521,29 @@ pub fn resolve_token(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_credentials_use_the_configured_auth_backend() {
+        for backend in ["oauth", "keyring"] {
+            let result = AccountResolution {
+                accounts: Vec::new(),
+                failures: vec![AccountResolutionError {
+                    account_id: "account".into(),
+                    label: "Mail".into(),
+                    jmap_url: "https://mail.example/jmap/session".into(),
+                    username: "alice".into(),
+                    auth_backend: backend.into(),
+                    error: "No refresh token in keyring or config".into(),
+                }],
+            };
+            let input = accounts_or_input(result).unwrap_err();
+            if backend == "oauth" {
+                assert!(matches!(input, ConfigNeedsInput::OAuthReauth { .. }));
+            } else {
+                assert!(matches!(input, ConfigNeedsInput::TokenOnly { .. }));
+            }
+        }
+    }
 
     #[test]
     fn auth_backend_keyring_roundtrips() {
